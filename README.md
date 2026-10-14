@@ -81,6 +81,10 @@ npx skills add AVGVSTVS96/autofork
 
 Your agent then knows how to fork a repo and keep its changes as patches.
 
+## Codebase
+
+The implementation is in `src/autofork.ts`. It contains the CLI commands (`fork`, `init`, `save`, `status` and `sync`) and the shared Git helpers they use. A sync builds patches in order in a temporary Git worktree, checks the result, then refreshes patch files and updates the fork. The `action.sh` entry point runs the built CLI in GitHub Actions; `action.yml` defines that action, and `dist/autofork.js` is the generated executable published by the package.
+
 ## Config
 
 `.autofork/config.json`:
