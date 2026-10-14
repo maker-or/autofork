@@ -1,0 +1,33 @@
+name: autofork
+
+on:
+  schedule:
+    - cron: "17 * * * *"
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths: [".autofork/**"]
+
+permissions:
+  contents: write
+  issues: write
+  id-token: write
+
+concurrency: autofork
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@v2
+      - uses: AVGVSTVS96/autofork@v1
+        with:
+          codex-auth-url: https://autofork-app.vercel.app/api/chatgpt/auth
+        env:
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          CODEX_AUTH: ${{ secrets.CODEX_AUTH }}
