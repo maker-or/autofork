@@ -300,24 +300,29 @@ test("init follows releases when every release is named with a dash", () => {
   expect(autofork(mine, "init", "acme/desktop").log).toContain("acme/desktop's main branch, since it has no releases");
 });
 
-test("a fork following prereleases takes upstream's newest published release, nightlies included", () => {
+test("a fork can follow one channel of upstream's releases, named by its tags", () => {
   const app = join(github, "acme/nightly.git");
   mkdirSync(app, { recursive: true });
   sh(app, "git init -q && echo one > notes.txt && git add -A && git commit -qm one && git tag v1.0.0");
-  sh(app, "echo two > notes.txt && git commit -qam two && git tag v1.1.0-nightly.1 && echo three > notes.txt && git commit -qam three && git tag v1.1.0-nightly.2");
+  sh(app, "echo two > notes.txt && git commit -qam two && git tag v1.1.0-nightly.1 && echo three > notes.txt && git commit -qam three && git tag v1.1.0-preview.1");
   sh(home, `git clone -q ${app} nightly && git -C nightly reset -q --hard v1.0.0`);
   const mine = join(home, "nightly");
-  expect(autofork(mine, "init", "acme/nightly", "--follow", "prereleases").log).toContain("autofork follows acme/nightly's prereleases.");
-  sh(mine, "git add -A && git commit -qm 'track upstream'");
   const releases = JSON.stringify([
-    { tag_name: "v1.1.0-nightly.2", draft: true, published_at: null },
-    { tag_name: "v1.0.0", draft: false, published_at: "2026-01-01T00:00:00Z" },
-    { tag_name: "v1.1.0-nightly.1", draft: false, published_at: "2026-01-02T00:00:00Z" },
+    { tag_name: "v1.1.0-nightly.2", draft: true, prerelease: true, published_at: null },
+    { tag_name: "v1.1.0-preview.1", draft: false, prerelease: true, published_at: "2026-01-03T00:00:00Z" },
+    { tag_name: "v1.1.0-nightly.1", draft: false, prerelease: true, published_at: "2026-01-02T00:00:00Z" },
+    { tag_name: "v1.0.0", draft: false, prerelease: false, published_at: "2026-01-01T00:00:00Z" },
   ]);
-  expect(autoforkWith({ RELEASES: releases }, mine, "sync").output.result).toBe("synced");
+  const init = autoforkWith({ RELEASES: releases, LATEST_RELEASE: "v1.0.0" }, mine, "init", "acme/nightly");
+  expect(init.log).toContain("autofork follows acme/nightly's releases.\nIt also publishes v*-preview.*, v*-nightly.*.");
+  const config = JSON.parse(file(mine, ".autofork/config.json"));
+  write(mine, ".autofork/config.json", `${JSON.stringify({ ...config, follow: "v*-nightly.*" }, null, 2)}\n`);
+  sh(mine, "git add -A && git commit -qm 'track nightlies'");
+  const synced = autoforkWith({ RELEASES: releases }, mine, "sync");
+  expect(synced.output).toMatchObject({ result: "synced", tag: "v1.1.0-nightly.1" });
   expect(file(mine, "notes.txt")).toBe("two\n");
-  expect(autofork(mine, "sync").output.result).toBe("synced");
-  expect(file(mine, "notes.txt")).toBe("three\n");
+  expect(autofork(mine, "sync").output.result).toBe("current");
+  expect(file(mine, "notes.txt")).toBe("two\n");
 });
 
 test("init turns on Actions and issues for the fork origin points to, not the upstream gh picks", () => {

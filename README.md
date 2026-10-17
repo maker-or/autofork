@@ -71,7 +71,9 @@ The agent only runs when a release breaks a patch. Between releases, the workflo
 
 Commit straight to your fork and the workflow leaves it alone until upstream moves. A rebuild would drop changes no patch holds, so then it stops once and lists them: save them as a patch and push, and the next run syncs.
 
-To take nightlies and betas too, set `"follow": "prereleases"`: the fork moves to whichever release upstream published last. To follow a branch instead, set `"follow": "main"`. Every upstream commit then gets the same treatment.
+To follow a channel like nightlies, put its tag pattern in `follow`, like `"v*-nightly.*"`. The fork then moves to the newest release whose tag matches, and `init` lists the channels upstream publishes. To follow a branch instead, set `"follow": "main"`. Every upstream commit then gets the same treatment.
+
+An app that updates itself, like a desktop app, updates from upstream's releases until the fork publishes its own. The skill's [release steps](skills/autofork/releases.md) set that up once: a release workflow that runs after each sync, the updater pointed at the fork, and Mac builds signed so they can update without an Apple certificate. [My T3 Code fork](https://github.com/AVGVSTVS96/t3code/releases) works this way.
 
 ## Agents
 
@@ -100,7 +102,7 @@ The implementation is in `src/autofork.ts`. It contains the CLI commands (`fork`
 | key | |
 | --- | --- |
 | `upstream` | `owner/repo`, or any git URL |
-| `follow` | `releases` (the release GitHub marks as upstream's latest, or its newest version tag when it has no GitHub releases), `prereleases` (upstream's most recently published release, nightlies and betas included, or its newest tag of any kind when it has no GitHub releases) or a branch. Default: `releases`, or the default branch if upstream has no releases |
+| `follow` | `releases` (the release GitHub marks as upstream's latest, or its newest version tag when it has no GitHub releases), a channel (a tag pattern like `v*-nightly.*`: the newest release whose tag matches) or a branch. Default: `releases`, or the default branch if upstream has no releases |
 | `verify` | the command that checks a build |
 | `agent` | the command that rebuilds a patch, prompt on stdin. Default: Claude Code when `CLAUDE_CODE_OAUTH_TOKEN` is set, otherwise Codex when it's signed in (a `CODEX_AUTH` secret holding `~/.codex/auth.json`) |
 | `green` | when following a branch, `false` takes upstream's newest commit even when its checks failed |
@@ -122,9 +124,10 @@ Usage:
   autofork sync                 rebuild on upstream; an agent heals what no longer applies
 
 Options for fork and init:
-  --follow <what>               releases, prereleases (newest release, nightlies
-                                and betas too) or a branch. Default: releases,
-                                or the default branch if upstream has none
+  --follow <what>               releases (upstream's Latest), a channel of them
+                                by tag, like 'v*-nightly.*', or a branch.
+                                Default: releases, or the default branch if
+                                upstream has none
   --verify <command>            the command that checks a build
 ```
 

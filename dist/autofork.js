@@ -93,37 +93,50 @@ function github(path) {
     headers.authorization = `Bearer ${token}`;
   return fetch(`https://api.github.com/${path}`, { headers });
 }
+function parseFollow(follow) {
+  if (follow === "releases")
+    return {};
+  if (!follow.includes("*"))
+    return { branch: follow };
+  const escaped = follow.split("*").map((part) => part.replace(/[.+?^${}()|[\]\\]/g, "\\$&"));
+  return { channel: new RegExp(`^${escaped.join(".*")}$`) };
+}
 async function fetchUpstream(root, config) {
   const url = upstreamUrl(config.upstream);
-  const ref = followsReleases(config.follow) ? await latestRelease(root, config.upstream, config.follow === "prereleases") : `refs/heads/${config.follow}`;
-  if (!ref)
-    throw new Failure(`${url} has no releases. Follow a branch instead: set "follow" in ${DIR}/config.json`);
+  const follow = parseFollow(config.follow);
+  const tag = "branch" in follow ? undefined : await latestRelease(root, config.upstream, follow.channel);
+  if (!("branch" in follow) && !tag)
+    throw new Failure(`${url} has no releases${follow.channel ? ` matching ${config.follow}` : ""}. Follow a branch or another channel instead: set "follow" in ${DIR}/config.json`);
+  const ref = "branch" in follow ? `refs/heads/${follow.branch}` : `refs/tags/${tag}`;
   git(root, "fetch", "--quiet", "--no-tags", url, `+${ref}:refs/autofork/upstream`, "+HEAD:refs/autofork/branch");
-  return git(root, "rev-parse", "refs/autofork/upstream^{commit}");
+  return { tip: git(root, "rev-parse", "refs/autofork/upstream^{commit}"), tag };
 }
-var followsReleases = (follow) => follow === "releases" || follow === "prereleases";
-var newestPublished = (releases) => releases.filter((release) => !release.draft).sort((a, b) => b.published_at.localeCompare(a.published_at))[0]?.tag_name;
-async function publishedRelease(upstream, pre) {
+async function releases(upstream, path) {
   const repo = githubRepo(upstream);
   if (!repo)
     return;
   try {
-    const response = await github(pre ? `repos/${repo}/releases?per_page=30` : `repos/${repo}/releases/latest`);
+    const response = await github(`repos/${repo}/${path}`);
     if (response.ok)
-      return pre ? newestPublished(await response.json()) : (await response.json()).tag_name;
+      return response.json();
     if (response.status !== 404)
       say(`can't read ${repo}'s releases (${response.status}), using its newest version tag`);
   } catch {
     say(`can't reach GitHub for ${repo}'s releases, using its newest version tag`);
   }
 }
-async function latestRelease(root, upstream, pre = false) {
-  const published = await publishedRelease(upstream, pre);
+async function latestRelease(root, upstream, channel) {
+  const published = channel ? (await releases(upstream, "releases?per_page=100"))?.filter((release) => !release.draft && channel.test(release.tag_name)).sort((a, b) => b.published_at.localeCompare(a.published_at))[0]?.tag_name : (await releases(upstream, "releases/latest"))?.tag_name;
   if (published)
-    return `refs/tags/${published}`;
+    return published;
   const tags = git(root, "ls-remote", "--tags", "--refs", "--sort=-v:refname", upstreamUrl(upstream)).split(`
 `);
-  return tags.map((line) => line.split("\t")[1]).find((ref) => ref && (pre || !ref.includes("-")));
+  return tags.map((line) => line.split("\t")[1]?.replace("refs/tags/", "")).find((tag) => tag && (channel ? channel.test(tag) : !tag.includes("-")));
+}
+var channelOf = (tag) => tag.replace(/\d+/g, "*").replace(/\*(?:\.\*)+/g, "*");
+async function channels(upstream) {
+  const published = await releases(upstream, "releases?per_page=100") ?? [];
+  return [...new Set(published.filter((release) => release.prerelease && !release.draft).map((release) => channelOf(release.tag_name)))];
 }
 function baseline(root) {
   const synced = git(root, "log", "--first-parent", "-1", "--format=%s", "-E", "--grep=^auto(fork|patch): sync ", "HEAD").split(" ").at(-1);
@@ -138,7 +151,7 @@ function newer(root, base, candidate) {
 }
 async function newestGreen(root, config, base, tip) {
   const repo = githubRepo(config.upstream);
-  if (config.green === false || followsReleases(config.follow) || !repo)
+  if (config.green === false || !("branch" in parseFollow(config.follow)) || !repo)
     return tip;
   for (const sha of git(root, "rev-list", "--first-parent", "--max-count=30", `${base}..${tip}`).split(`
 `).filter(Boolean)) {
@@ -339,7 +352,7 @@ async function sync(root, args) {
   config.patches.forEach((id) => intent(root, id));
   if (git(root, "status", "--porcelain"))
     throw new Failure("commit or stash your changes first");
-  const tip = await fetchUpstream(root, config);
+  const { tip, tag } = await fetchUpstream(root, config);
   const base = baseline(root);
   const source = newer(root, base, await newestGreen(root, config, base, tip));
   const key = `${short(source)}-${short(git(root, "rev-parse", "HEAD"))}`;
@@ -395,7 +408,7 @@ Save them as a patch first: write ${DIR}/<id>/PATCH.md, then run autofork save <
 `);
     git(root, "merge", "--ff-only", "--quiet", git(root, "commit-tree", tree, ...parents, "-m", message));
     say(message);
-    output({ result: "synced" });
+    output({ result: "synced", ...tag && source === tip ? { tag } : {} });
   } finally {
     cleanup(root, result);
   }
@@ -451,7 +464,8 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
       # Set up whatever your verify command needs here (node, bun, rust, ...).
-      - uses: AVGVSTVS96/autofork@v1
+      - id: autofork
+        uses: AVGVSTVS96/autofork@v1
         env:
           CLAUDE_CODE_OAUTH_TOKEN: \${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
 `;
@@ -473,7 +487,14 @@ async function setup(root, upstream, args) {
   const readme = addNote(root, upstream, base, drift);
   const inherited = git(root, "ls-files", ".github/workflows").split(`
 `).filter((file) => file && !file.endsWith("/autofork.yml"));
-  say(followsReleases(follow) ? `autofork follows ${upstream}'s ${follow}.` : `autofork follows ${upstream}'s ${follow} branch${flag(args, "--follow") ? "" : ", since it has no releases"}.`);
+  if ("branch" in parseFollow(follow)) {
+    say(`autofork follows ${upstream}'s ${follow} branch${flag(args, "--follow") ? "" : ", since it has no releases"}.`);
+  } else {
+    const others = (await channels(upstream)).filter((channel) => channel !== follow);
+    say(`autofork follows ${upstream}'s ${follow === "releases" ? "" : `${follow} `}releases.`);
+    if (others.length)
+      say(`It also publishes ${others.join(", ")}. To follow one, put it in "follow" in ${DIR}/config.json.`);
+  }
   if (inherited.length)
     say(`Your fork has ${inherited.length} workflow${inherited.length === 1 ? "" : "s"} copied from upstream, and they run here too. Delete the ones you don't want; upstream's new ones never get copied in.`);
   if (readme)
@@ -542,7 +563,7 @@ function claim(root, upstream) {
 }
 async function init(root, args) {
   if (!args[0])
-    throw new Failure("usage: autofork init <owner/repo | git url> [--follow <releases | prereleases | branch>] [--verify <command>]");
+    throw new Failure("usage: autofork init <owner/repo | git url> [--follow <releases | channel | branch>] [--verify <command>]");
   await setup(root, args[0], args);
   claim(root, args[0]);
   say("Add a CLAUDE_CODE_OAUTH_TOKEN secret (claude setup-token), commit, and push.");
@@ -550,7 +571,7 @@ async function init(root, args) {
 async function fork(cwd, args) {
   const upstream = args[0];
   if (!/^[\w.-]+\/[\w.-]+$/.test(upstream ?? ""))
-    throw new Failure("usage: autofork fork <owner/repo> [--follow <releases | prereleases | branch>] [--verify <command>]");
+    throw new Failure("usage: autofork fork <owner/repo> [--follow <releases | channel | branch>] [--verify <command>]");
   if (!run("gh", ["repo", "fork", upstream, "--clone", "--default-branch-only"], cwd).ok)
     throw new Failure("gh couldn't fork it. Is the GitHub CLI installed and logged in?");
   const root = join(cwd, upstream.split("/")[1]);
@@ -593,9 +614,10 @@ Usage:
   autofork sync                 rebuild on upstream; an agent heals what no longer applies
 
 Options for fork and init:
-  --follow <what>               releases, prereleases (newest release, nightlies
-                                and betas too) or a branch. Default: releases,
-                                or the default branch if upstream has none
+  --follow <what>               releases (upstream's Latest), a channel of them
+                                by tag, like 'v*-nightly.*', or a branch.
+                                Default: releases, or the default branch if
+                                upstream has none
   --verify <command>            the command that checks a build
 
 A patch is .autofork/<id>/PATCH.md, saying what the change does and why, next

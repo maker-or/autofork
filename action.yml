@@ -18,6 +18,9 @@ outputs:
   result:
     description: synced, current, waiting, skipped, moved, or failed
     value: ${{ steps.sync.outputs.result }}
+  tag:
+    description: The upstream release tag a sync moved to, when the fork follows releases
+    value: ${{ steps.sync.outputs.tag }}
 runs:
   using: composite
   steps:
