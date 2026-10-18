@@ -345,3 +345,39 @@ esac
   expect(calls).toContain("repo edit me/app --enable-issues");
   expect(calls).toContain("api -X PATCH repos/me/app -f description=Ada's autofork · An app");
 });
+
+test("a sync names upstream's changes to workflows the fork keeps, and leaves the fork's copies as they are", () => {
+  const origin = join(home, "ci");
+  const mine = join(home, "ci-fork");
+  mkdirSync(join(origin, ".github/workflows"), { recursive: true });
+  sh(origin, "git init -q -b trunk && echo one > app.js");
+  for (const name of ["release", "test", "lint"]) write(origin, `.github/workflows/${name}.yml`, `name: ${name}\n`);
+  sh(origin, "git add -A && git commit -qm init");
+  sh(home, `git clone -q ${origin} ci-fork`);
+  const base = sh(mine, "git rev-parse HEAD").slice(0, 12);
+  expect(autofork(mine, "init", origin).log).toContain("opens an issue when upstream changes one you keep");
+  write(mine, ".github/workflows/release.yml", "name: release from the fork\n");
+  sh(mine, "git rm -q .github/workflows/lint.yml && git add -A && git commit -qm 'track upstream, release from the fork'");
+  sh(origin, "echo two > app.js");
+  for (const name of ["release", "test", "lint", "deploy"]) write(origin, `.github/workflows/${name}.yml`, `name: ${name} 2\n`);
+  sh(origin, "git add -A && git commit -qm two");
+  write(mine, ".github/workflows/test.yml", "name: test 2\n");
+  sh(mine, "git commit -qam 'bring test.yml over'");
+  const { ok, log } = autofork(mine, "sync");
+  expect(ok).toBe(true);
+  expect(file(mine, "app.js")).toBe("two\n");
+  expect(log).toContain(`upstream changed .github/workflows/release.yml in ${base}..${sh(origin, "git rev-parse HEAD").slice(0, 12)}`);
+  expect(log).not.toMatch(/upstream changed .*(test|lint|deploy)\.yml/);
+  expect(file(mine, ".github/workflows/release.yml")).toBe("name: release from the fork\n");
+  expect(sh(mine, "ls .github/workflows")).toBe("autofork.yml\nrelease.yml\ntest.yml");
+});
+
+test("a config without follow follows what init would pick", () => {
+  const mine = join(home, "ci-fork");
+  const config = JSON.parse(file(mine, ".autofork/config.json"));
+  write(mine, ".autofork/config.json", `${JSON.stringify({ upstream: config.upstream }, null, 2)}\n`);
+  sh(mine, "git commit -qam 'no follow'");
+  sh(join(home, "ci"), "echo three > app.js && git commit -qam three");
+  expect(autofork(mine, "sync").output.result).toBe("synced");
+  expect(file(mine, "app.js")).toBe("three\n");
+});

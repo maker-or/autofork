@@ -7,6 +7,7 @@ import { basename, join } from "node:path";
 
 const DIR = ".autofork";
 const CONTROL = [DIR, ".github"];
+const WORKFLOWS = [".github/workflows", ".github/actions"];
 const SOURCE = [".", ...CONTROL.map((path) => `:(exclude)${path}`)];
 const BOT = [
   "-c", "user.name=autofork",
@@ -76,12 +77,13 @@ function output(values: Record<string, string>) {
   writeFileSync(file, Object.entries(values).map(([key, value]) => `${key}=${value}\n`).join(""), { flag: "a" });
 }
 
-function readConfig(root: string): Fork {
+async function readConfig(root: string): Promise<Fork> {
   if (!existsSync(configFile(root))) {
     throw new Failure("no .autofork/config.json here. Start with: autofork init <owner/repo>");
   }
-  const { branch, patches: _, ...config } = JSON.parse(readFileSync(configFile(root), "utf8"));
-  return { follow: branch ?? "main", ...config, patches: discover(root).filter((id) => !existsSync(upstreamDoc(root, id))) };
+  const config: Partial<Config> & { upstream: string } = JSON.parse(readFileSync(configFile(root), "utf8"));
+  const follow = config.follow ?? (await defaultFollow(root, config.upstream));
+  return { ...config, follow, patches: discover(root).filter((id) => !existsSync(upstreamDoc(root, id))) };
 }
 
 function discover(root: string) {
@@ -156,6 +158,15 @@ async function latestRelease(root: string, upstream: string, channel?: RegExp): 
   return tags.map((line) => line.split("\t")[1]?.replace("refs/tags/", "")).find((tag) => tag && (channel ? channel.test(tag) : !tag.includes("-")));
 }
 
+function defaultBranch(root: string, upstream: string) {
+  const head = run("git", ["ls-remote", "--symref", upstreamUrl(upstream), "HEAD"], root).out.toString();
+  return head.match(/^ref: refs\/heads\/(\S+)\s+HEAD/m)?.[1] ?? "main";
+}
+
+async function defaultFollow(root: string, upstream: string) {
+  return (await latestRelease(root, upstream)) ? "releases" : defaultBranch(root, upstream);
+}
+
 const channelOf = (tag: string) => tag.replace(/\d+/g, "*").replace(/\*(?:\.\*)+/g, "*");
 
 async function channels(upstream: string) {
@@ -214,7 +225,7 @@ function healPrompt(config: Fork, build: Build, id: string, source: string, from
     `Read ${DIR}/${id}/PATCH.md. It says what the patch does and why, and that's the contract.`,
     ...(fresh ? [] : [`${DIR}/${id}/${id}.patch is how it was done before. Use it as a guide, not as text to force in.${changes}`]),
     "Build it on the current source, the smallest change that fully does what PATCH.md says. Build on what upstream has now: where upstream has its own version of what the patch touches, change that rather than bringing the old one back. Follow upstream's code and conventions, and leave everything else alone.",
-    ...(config.verify ? [`Run \`${config.verify}\` and fix what your change breaks. Patches after this one aren't applied yet.`] : []),
+    `Run upstream's own checks for the code you touched${config.verify ? `, and \`${config.verify}\`, which the sync has to pass` : ""}. Fix what your change breaks. Patches after this one aren't applied yet.`,
     ...(fresh ? [`Add a short paragraph to the end of ${DIR}/${id}/PATCH.md on why it's built the way it is, for whoever rebuilds it after upstream moves. Keep what's there as it is.`] : []),
   ];
   return `You are keeping a patched fork of ${config.upstream} in sync. The fork is upstream plus a stack of patches, each one described in ${DIR}/<id>/PATCH.md.
@@ -243,6 +254,12 @@ function restoreControl(dir: string, base: string) {
   const owned = git(dir, "ls-tree", "--name-only", base, "--", ...CONTROL).split("\n").filter(Boolean);
   if (owned.length) git(dir, "checkout", base, "--", ...owned);
   git(dir, "clean", "-fdq", "--", ...CONTROL);
+}
+
+function workflowsBehind(root: string, base: string, source: string) {
+  const files = (...args: string[]) => git(root, "diff", "--name-only", "--no-renames", ...args, "--", ...WORKFLOWS).split("\n");
+  const upstreamChanged = new Set(files(base, source));
+  return files("--diff-filter=MD", "HEAD", source).filter((file) => file && upstreamChanged.has(file));
 }
 
 function changed(dir: string) {
@@ -370,7 +387,7 @@ function check(root: string, config: Fork, against: string, base = baseline(root
 }
 
 async function sync(root: string, args: string[]) {
-  const config = readConfig(root);
+  const config = await readConfig(root);
   config.patches.forEach((id) => intent(root, id));
   if (git(root, "status", "--porcelain")) throw new Failure("commit or stash your changes first");
   const { tip, tag } = await fetchUpstream(root, config);
@@ -416,6 +433,7 @@ async function sync(root: string, args: string[]) {
     const lines = [
       ...result.healed,
       ...[...result.upstreamHas].map(([id, reason]) => `upstream has ${id}: ${reason}`),
+      ...workflowsBehind(root, base, source).map((file) => `upstream changed ${file} in ${short(base)}..${short(source)}`),
     ];
     const message = [`autofork: sync ${config.upstream} to ${short(source)}`, lines.join("\n")].filter(Boolean).join("\n\n");
     git(root, "merge", "--ff-only", "--quiet", git(root, "commit-tree", tree, ...parents, "-m", message));
@@ -432,7 +450,7 @@ async function save(root: string, args: string[]) {
   if (!existsSync(patchDoc(root, id))) throw new Failure(`write ${DIR}/${id}/PATCH.md first: what the change does and why`);
   intent(root, id);
   rmSync(upstreamDoc(root, id), { force: true });
-  const config = readConfig(root);
+  const config = await readConfig(root);
   await fetchUpstream(root, config);
   const files = workingTree(root);
   const { base, rebuilt, drift } = check(root, config, files);
@@ -483,15 +501,12 @@ jobs:
 
 async function setup(root: string, upstream: string, args: string[]) {
   if (existsSync(configFile(root))) throw new Failure(`${DIR}/config.json already exists`);
-  const url = upstreamUrl(upstream);
-  const head = run("git", ["ls-remote", "--symref", url, "HEAD"], root).out.toString();
-  const branch = head.match(/^ref: refs\/heads\/(\S+)\s+HEAD/m)?.[1] ?? "main";
-  const follow = flag(args, "--follow") ?? ((await latestRelease(root, upstream)) ? "releases" : branch);
+  const follow = flag(args, "--follow") ?? (await defaultFollow(root, upstream));
   const config: Config = { upstream, follow, verify: flag(args, "--verify") };
   writeConfig(root, config);
   const path = join(root, ".github/workflows/autofork.yml");
   mkdirSync(join(root, ".github/workflows"), { recursive: true });
-  if (!existsSync(path)) writeFileSync(path, workflow(git(root, "branch", "--show-current") || branch));
+  if (!existsSync(path)) writeFileSync(path, workflow(git(root, "branch", "--show-current") || defaultBranch(root, upstream)));
   await fetchUpstream(root, config);
   const { base, drift } = check(root, { ...config, patches: [] }, workingTree(root));
   const readme = addNote(root, upstream, base, drift);
@@ -503,7 +518,7 @@ async function setup(root: string, upstream: string, args: string[]) {
     say(`autofork follows ${upstream}'s ${follow === "releases" ? "" : `${follow} `}releases.`);
     if (others.length) say(`It also publishes ${others.join(", ")}. To follow one, put it in "follow" in ${DIR}/config.json.`);
   }
-  if (inherited.length) say(`Your fork has ${inherited.length} workflow${inherited.length === 1 ? "" : "s"} copied from upstream, and they run here too. Delete the ones you don't want; upstream's new ones never get copied in.`);
+  if (inherited.length) say(`Your fork has ${inherited.length} workflow${inherited.length === 1 ? "" : "s"} copied from upstream, and they run here too. Delete the ones you don't want. autofork leaves workflows to you: it never copies upstream's new ones in, and opens an issue when upstream changes one you keep.`);
   if (readme) say(`${readme} now says this is a personal fork kept current by autofork. To drop that line, delete it and ${DIR}/${NOTE}/.`);
   if (drift.length) say(`Your branch already changes ${drift.length} file${drift.length === 1 ? "" : "s"}. Save them as a patch: write ${DIR}/<id>/PATCH.md, then autofork save <id>`);
   return readme;
@@ -589,7 +604,7 @@ async function fork(cwd: string, args: string[]) {
 }
 
 async function status(root: string) {
-  const config = readConfig(root);
+  const config = await readConfig(root);
   await fetchUpstream(root, config);
   const { base, drift } = check(root, config, workingTree(root));
   const behind = git(root, "rev-list", "--count", "--first-parent", `${base}..refs/autofork/upstream`);

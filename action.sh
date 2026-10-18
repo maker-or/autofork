@@ -62,4 +62,22 @@ if [ "$(git rev-parse HEAD)" != "$head" ]; then
       echo "::warning::upstream has $id now and autofork paused it, but couldn't open an issue about it: turn on the fork's issues and give the workflow issues: write"
     fi
   done
+
+  workflows="$(git log -1 --format=%B | sed -n 's/^upstream changed \(.*\) in \(.*\)$/- `\1`, in \2/p')"
+  title="upstream changed workflows this fork copied"
+  if [ -n "$workflows" ]; then
+    issue="$(gh issue list -R "$GITHUB_REPOSITORY" --state open --search "$title in:title" --json number,title \
+      --jq "map(select(.title == \"$title\"))[0].number // empty" 2> /dev/null || true)"
+    if [ -n "$issue" ]; then
+      gh issue comment "$issue" -R "$GITHUB_REPOSITORY" --body "Upstream changed these too, synced in ${signed:0:12}:"$'\n\n'"$workflows" > /dev/null
+    else
+      gh issue create -R "$GITHUB_REPOSITORY" --title "$title" --body "Upstream changed workflows this fork keeps its own copies of:
+
+$workflows
+
+autofork never changes the fork's \`.github/\`, and a workflow's GitHub token can't push workflow files. Bring over what this fork needs from upstream's changes, keeping what it does differently, or delete the copies it doesn't run, then close this issue.
+
+Synced in ${signed:0:12}." > /dev/null
+    fi || echo "::warning::upstream changed workflows this fork copied, but autofork couldn't open an issue about it: turn on the fork's issues and give the workflow issues: write"
+  fi
 fi

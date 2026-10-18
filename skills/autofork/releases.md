@@ -14,36 +14,35 @@ Set `follow` to the channel the user runs. `init` lists the channels upstream pu
 
 Make one patch, a `release-feed` patch, that swaps upstream's repo for the fork's wherever step 1 found it. Keep any override upstream offers, like an environment variable for the download URL. Build tools guess the repo from config such as `package.json`'s `repository`, so check the feed file in a built app rather than trusting the config.
 
-If the updater checks its own signature on updates, like Tauri's `pubkey` or Sparkle's `SUPublicEDKey`, generate a keypair for the fork. Patch the public key in, and add the private key as a repo secret.
-
 ## 4. Add a release workflow
 
-Start from upstream's release workflow. Save it as the fork's own file in `.github/workflows/`, which autofork never rebuilds or overwrites.
+Start from upstream's release workflow, and save it under the same name in `.github/workflows/`. A sync never changes it, and when upstream changes its own, the sync opens an issue so the fork can bring the change over.
 
-- Trigger it only on `workflow_dispatch`, with a `tag` input. Upstream's tag triggers never fire in the fork.
+- Trigger it only on `workflow_dispatch`, with a `tag` input, which `autofork.yml` fills in. Upstream's tag triggers never fire in the fork.
 - Build the commit the dispatch ran on, the fork's branch. Never check out upstream's tag, which has none of the patches.
 - Give the build the version from the tag explicitly. The fork's commit carries no tag, so tools that read the version from git get it wrong.
 - Keep the builds and the update files. Drop package registry publishing, deploys, announcements and anything else that needs upstream's secrets.
 - Publish the GitHub Release yourself, under the tag and at the built commit, with upstream's prerelease and latest flags for that tag. Never publish a draft. Updaters skip drafts.
-- When the `tag` input is empty, find it the way autofork does. The last sync commit's message ends with the upstream commit. Pick the tag on that commit in `git ls-remote --tags <upstream>` that matches `follow`.
+- Open an issue when a run fails, or comment on the one already open. GitHub tells only whoever started a run that it failed, and `autofork.yml`'s dispatch is started by GitHub's bot.
 - Run on GitHub's standard hosted runners, which cost nothing on a public fork. A private fork pays for every minute, and macOS minutes cost the most.
 
-Then start it from `autofork.yml`. A push made with `GITHUB_TOKEN` starts no workflows, but a dispatch does. Give the autofork step `id: autofork`, add `actions: write` to the workflow's `permissions`, and add this step after it:
+Then start it from `autofork.yml`. A push made with `GITHUB_TOKEN` starts no workflows, but a dispatch does. Give the autofork step `id: autofork`, add `actions: write` to the workflow's `permissions`, and add this step after it, with the release workflow's file name:
 
 ```yaml
-- if: steps.autofork.outputs.result == 'synced'
+- if: steps.autofork.outputs.result == 'synced' && steps.autofork.outputs.tag != ''
   env:
     GH_TOKEN: ${{ github.token }}
     TAG: ${{ steps.autofork.outputs.tag }}
-  run: gh workflow run release.yml --repo "$GITHUB_REPOSITORY" ${TAG:+-f tag="$TAG"}
+  run: gh workflow run release.yml --repo "$GITHUB_REPOSITORY" -f tag="$TAG"
 ```
 
-## 5. Sign without upstream's certificates
+## 5. Pass the updater's checks without upstream's keys
 
-Keep upstream's signing path for builds that have the secrets. Without them:
+An updater installs a build only if it passes the updater's checks, and upstream's builds pass them with keys and certificates the fork doesn't have. Keep upstream's signing path for builds that have the secrets. Then find each check the updater makes, and make the fork's builds pass it on their own. The common ones:
 
+- **An update signature**, like Tauri's `pubkey` or Sparkle's `SUPublicEDKey`. Generate a keypair for the fork, patch the public key in, and add the private key as a repo secret.
 - **macOS with Squirrel.Mac, which Electron apps use.** It installs a new build only if the build satisfies the running app's designated requirement. A plain ad-hoc signature requires its own code hash, so every update is refused. Make a patch that signs builds without a certificate ad hoc, with the hardened runtime off and the app bundle's designated requirement set to `identifier "<bundle id>"`. With electron-builder that's `identity: "-"`, `hardenedRuntime: false`, and `requirements: '=designated => identifier "<bundle id>"'` on the outer app only.
-- **Windows.** Unsigned builds install and update, unless the update config names a publisher. electron-updater refuses unsigned updates when `publisherName` is set, so drop it for unsigned builds.
+- **Windows with electron-updater.** It refuses unsigned updates when the update config names a `publisherName`, so drop it for unsigned builds.
 
 ## 6. Check the real release
 
@@ -51,11 +50,11 @@ Download the fork's release, not a local build, and check:
 
 - The version is the upstream tag.
 - The feed file inside the app names the fork and the channel.
-- On macOS, `codesign -d -r-` prints `designated => identifier "<bundle id>"`, and `codesign --verify --strict --deep` passes.
+- For a Mac build signed ad hoc, `codesign -d -r-` prints `designated => identifier "<bundle id>"`, and `codesign --verify --strict --deep` passes.
 
 ## 7. Move each install over once
 
-A build of upstream's follows upstream's feed, and a Mac app signed by a different identity refuses an ad-hoc update. So install the fork's build once on every machine.
+A build of upstream's follows upstream's feed and trusts only upstream's keys and certificates, so install the fork's build once on every machine.
 
 1. Quit the app.
 2. Set the old app aside and put the fork's build in its place.
