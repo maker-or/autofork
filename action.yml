@@ -1,5 +1,5 @@
 name: autofork
-description: Rebuild your fork from upstream plus your patches. An agent re-implements the ones that stop applying.
+description: Rebuild your fork from upstream plus your patches. An agent re-implements the ones that break.
 author: AVGVSTVS96
 branding:
   icon: git-merge
@@ -9,7 +9,7 @@ inputs:
     description: Token that pushes the signed sync commit
     default: ${{ github.token }}
   heal:
-    description: Let the agent rebuild patches that no longer apply. When false, they wait for a run that heals.
+    description: Let the agent rebuild patches that no longer apply or fail verify. When false, they wait for a run that heals.
     default: "true"
   codex-auth-url:
     description: "Where to send Codex's sign-in after it refreshes, so the CODEX_AUTH secret stays current. Needs `id-token: write`."
@@ -36,10 +36,10 @@ runs:
         HEAL: ${{ inputs.heal }}
         CODEX_AUTH_URL: ${{ inputs.codex-auth-url }}
       run: '"$GITHUB_ACTION_PATH/action.sh"'
-    - if: failure() && steps.sync.outputs.key != ''
+    - if: (failure() || cancelled()) && steps.sync.outputs.key != ''
       shell: bash
       run: echo '${{ steps.sync.outputs.key }}' > "$RUNNER_TEMP/autofork-failed"
-    - if: failure() && steps.sync.outputs.key != ''
+    - if: (failure() || cancelled()) && steps.sync.outputs.key != ''
       uses: actions/cache/save@v6
       with:
         path: ${{ runner.temp }}/autofork-failed

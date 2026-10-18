@@ -21,7 +21,7 @@ npx github:AVGVSTVS96/autofork fork owner/repo --verify "<command that checks a 
 
 It follows upstream's releases, or its default branch if it has none. `--follow <branch>` picks a branch; `--follow 'v*-nightly.*'` picks a channel of releases by tag, and `init` lists the channels upstream publishes. It needs `gh` logged in. If `CLAUDE_CODE_OAUTH_TOKEN` is set, it also adds that secret; otherwise tell the user to run `claude setup-token` and `gh secret set CLAUDE_CODE_OAUTH_TOKEN`. In a fork that's already cloned, use `init owner/repo` instead.
 
-`verify` is the check a sync has to pass before it pushes, and the agent that rebuilds a patch runs it too. Take it from upstream's own CI: checks that cover the code the patches touch and pass on upstream as it is. Set up what it needs in `.github/workflows/autofork.yml`, before the autofork step.
+`verify` is the check a sync has to pass before it pushes, and the agent that rebuilds a patch runs it too. A patch that still applies but fails it is rebuilt like one that no longer applies. Take it from upstream's own CI: checks that cover the code the patches touch, pass on upstream as it is, and give the same answer every run. Set up what it needs in `.github/workflows/autofork.yml`, before the autofork step.
 
 ## Change a fork
 

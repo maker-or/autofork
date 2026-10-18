@@ -13,14 +13,20 @@
   "engines": {
     "node": ">=20"
   },
+  "packageManager": "bun@1.4.2",
   "scripts": {
     "build": "bun build src/autofork.ts --target node --outfile dist/autofork.js",
     "test": "bun run build && bun test",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "lint": "oxlint src test && oxfmt --check src test",
+    "fmt": "oxfmt src test",
+    "check": "bun run typecheck && bun run lint && bun run test"
   },
   "devDependencies": {
-    "@types/bun": "^1.4.2",
+    "@types/bun": "^1.4.3",
     "@types/node": "^24.0.0",
-    "typescript": "^5.9.0"
+    "oxfmt": "0.73.0",
+    "oxlint": "^1.88.0",
+    "typescript": "^7.0.2"
   }
 }

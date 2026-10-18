@@ -63,11 +63,11 @@ doesn't undo them.
 
 ## Updates
 
-When upstream publishes a release, the workflow rebuilds your fork on it. Patches that still apply go in with git. When one doesn't, an agent rebuilds it from its `PATCH.md`, your `verify` command checks the build, and the result is pushed as a signed commit.
+When upstream publishes a release, the workflow rebuilds your fork on it. Patches that still apply go in with git. When one doesn't, or your `verify` command fails with it, an agent rebuilds it from its `PATCH.md`. Once `verify` passes, the result is pushed as a signed commit.
 
 When upstream ships its own version of one of your patches, autofork stops applying it and opens an issue on your fork. The fork takes upstream's version, and the agent isn't called for that patch again. You decide what happens next: delete the patch's folder to keep upstream's, or say in its `PATCH.md` how yours differs and delete its `UPSTREAM.md` to bring yours back.
 
-The agent only runs when a release breaks a patch. Between releases, the workflow's hourly check is git only and ends in seconds. A failed rebuild isn't retried until upstream or your fork changes; running the workflow by hand always retries.
+The agent only runs when a release breaks a patch. Between releases, the workflow's hourly check is git only and ends in seconds. A rebuild that fails or runs out of time isn't retried until upstream or your fork changes; running the workflow by hand always retries.
 
 Commit straight to your fork and the workflow leaves it alone until upstream moves. A rebuild would drop changes no patch holds, so then it stops once and lists them: save them as a patch and push, and the next run syncs.
 
@@ -123,7 +123,7 @@ Usage:
   autofork init <owner/repo>    set up a fork you already have, from inside it
   autofork save <id>            save your changes as the patch in .autofork/<id>
   autofork status               your patches, and changes no patch holds yet
-  autofork sync                 rebuild on upstream; an agent heals what no longer applies
+  autofork sync                 rebuild on upstream; an agent heals what breaks
 
 Options for fork and init:
   --follow <what>               releases (upstream's Latest), a channel of them
@@ -135,9 +135,27 @@ Options for fork and init:
 
 ## Roadmap
 
-First batch of updates after launch:
+autofork keeps forks current today. The agent behind it is meant to grow into automatic maintenance of any codebase, and autofork is its first packaging: set up in one step, with an app to see and manage your forks and what they cost.
 
-- An option to re-check every change against what you asked for on each new release, not only when a release breaks it. Today a change is only revisited when it stops applying.
+**Just landed**
+
+- Workflows a fork keeps from upstream, like its release workflow: a sync opens an issue when upstream changes one, since a sync leaves `.github/` to the fork.
+- Rebuilds checked by upstream's own checks on the code they touch, and `verify` picked from upstream's CI so it covers what the patches change.
+- Release steps for apps that update themselves that sign for whatever the updater checks, with Electron as one example.
+- Patches that still apply but fail `verify`, rebuilt by the agent like ones that no longer apply, instead of failing the sync until someone steps in.
+
+**What we're building next**
+
+- Limits on what the agent spends, set by you: rebuilds a month, spend a month and spend per rebuild, with defaults like 10 rebuilds, $200 a month and $20 a rebuild at API prices. A run near the limit finishes instead of being thrown away.
+- What each fork's rebuilds cost, from their token counts at API prices.
+- A dashboard on [autofork.com](https://autofork.com) to see your forks and what each costs, and set its budget.
+- How often a fork checks upstream, set by you and run on time. GitHub's scheduled runs can start hours late.
+- An option to re-check every change against what you asked for on each new release, not only when a release breaks it.
+- A first install of a fork's app on a Mac that needs no developer certificate from you.
+
+**Open question**
+
+- Whether autofork.com only shows forks that run themselves in their own Actions, or can also run the same engine for you.
 
 ## History
 
@@ -146,6 +164,10 @@ First batch of updates after launch:
 - **July:** [herdr](https://github.com/AVGVSTVS96/herdr), the first fork rebuilt from patches. Proof of concept.
 - **October:** forks of [Claude Code's plugins](https://github.com/AVGVSTVS96/claude-plugins-official), [Buzz](https://github.com/AVGVSTVS96/buzz) and [T3 Code](https://github.com/AVGVSTVS96/t3code), in daily use.
 - **October:** autofork.
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## License
 
