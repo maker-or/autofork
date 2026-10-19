@@ -31,6 +31,8 @@ npx github:AVGVSTVS96/autofork save context-usage
 
 Or just write the `PATCH.md` and push. The workflow has an agent build it.
 
+Patches go on in the alphabetical order of their folder names, each on top of the ones before it. A patch the others need, like one that makes a package split out of a monorepo build on its own, needs a name that sorts first, like `0-standalone`.
+
 A `PATCH.md` is plain prose: what you want and why, and why it's built the way it is, not which lines it touches, so an agent can rebuild it on whatever upstream looks like next. This is the one in [my T3 Code fork](https://github.com/AVGVSTVS96/t3code/tree/main/.autofork/context-usage):
 
 ```md
@@ -63,7 +65,7 @@ doesn't undo them.
 
 ## Updates
 
-When upstream publishes a release, the workflow rebuilds your fork on it. Patches that still apply go in with git. When one doesn't, or your `verify` command fails with it, an agent rebuilds it from its `PATCH.md`. Once `verify` passes, the result is pushed as a signed commit.
+When upstream publishes a release, the workflow rebuilds your fork on it. Patches that still apply go in with git. When one doesn't, or your `setup` or `verify` command fails with it, an agent rebuilds it from its `PATCH.md`. Git applies what still fits first and marks the conflicts, so the agent starts with only the files left to finish, and with the last lines the command printed when that's what failed. Once `verify` passes, the result is pushed as a signed commit.
 
 When upstream ships its own version of one of your patches, autofork stops applying it and opens an issue on your fork. The fork takes upstream's version, and the agent isn't called for that patch again. You decide what happens next: delete the patch's folder to keep upstream's, or say in its `PATCH.md` how yours differs and delete its `UPSTREAM.md` to bring yours back.
 
@@ -97,7 +99,9 @@ The implementation is in `src/autofork.ts`. It contains the CLI commands (`fork`
 {
   "upstream": "pingdotgg/t3code",
   "follow": "releases",
-  "verify": "pnpm install --frozen-lockfile --ignore-scripts && pnpm --filter @t3tools/web typecheck"
+  "setup": "pnpm install --no-frozen-lockfile --ignore-scripts",
+  "generated": ["pnpm-lock.yaml"],
+  "verify": "pnpm --filter @t3tools/web typecheck"
 }
 ```
 
@@ -105,11 +109,13 @@ The implementation is in `src/autofork.ts`. It contains the CLI commands (`fork`
 | --- | --- |
 | `upstream` | `owner/repo`, or any git URL |
 | `follow` | `releases` (the release GitHub marks as upstream's latest, or its newest version tag when it has no GitHub releases), a channel (a tag pattern like `v*-nightly.*`: the newest release whose tag matches) or a branch. Default: `releases`, or the default branch if upstream has no releases |
+| `setup` | the command that installs dependencies in the rebuild, like `pnpm install --no-frozen-lockfile`. It runs before `verify` and the agent, and again once the patches under them change, and the agent is told it ran |
+| `generated` | files `setup` writes, like lockfiles. They're left out of patches and rebuilt by `setup` once the patches are in, so they never conflict |
 | `verify` | the command that checks a build |
 | `agent` | the command that rebuilds a patch, prompt on stdin. Default: Claude Code when `CLAUDE_CODE_OAUTH_TOKEN` is set, otherwise Codex when it's signed in (a `CODEX_AUTH` secret holding `~/.codex/auth.json`) |
 | `green` | when following a branch, `false` takes upstream's newest commit even when its checks failed |
 
-`.github/workflows/autofork.yml` is yours too: change how often it checks, and set up what `verify` needs (Node, Bun, Rust) before the autofork step. The action takes `heal: false` to apply what still fits without calling the agent, if you want rebuilds on one schedule and heals on another. With Codex, give it `codex-auth-url` and `id-token: write` so a refreshed sign-in is saved back to the secret.
+`.github/workflows/autofork.yml` is yours too: change how often it checks, and set up the tools `setup` and `verify` need (Node, Bun, Rust) before the autofork step, with your package manager's cache on so `setup` is quick. The action takes `heal: false` to apply what still fits without calling the agent, if you want rebuilds on one schedule and heals on another. With Codex, give it `codex-auth-url` and `id-token: write` so a refreshed sign-in is saved back to the secret.
 
 ## Commands
 
@@ -130,6 +136,9 @@ Options for fork and init:
                                 by tag, like 'v*-nightly.*', or a branch.
                                 Default: releases, or the default branch if
                                 upstream has none
+  --setup <command>             the command that installs dependencies
+  --generated <files>           files setup writes, like lockfiles, comma
+                                separated: rebuilt by setup, never patched
   --verify <command>            the command that checks a build
 ```
 
@@ -139,6 +148,8 @@ autofork keeps forks current today. The agent behind it is meant to grow into au
 
 **Just landed**
 
+- Forks whose upstream can't pass `verify` on its own, like a package split out of a monorepo: when `verify` fails, the sync finds the patch that breaks it, even when that's the one that makes the package build, instead of stopping at upstream. `init` and `fork` take `--setup` and `--generated`.
+- Rebuilds that start where git leaves off, from [a field report](https://github.com/AVGVSTVS96/autofork/issues/3) on a large fork: the agent gets the patch applied as far as it goes with conflict markers, only the files left to finish, `verify`'s last lines when it failed, and dependencies installed by `setup`, and lockfiles are rebuilt instead of patched.
 - Workflows a fork keeps from upstream, like its release workflow: a sync opens an issue when upstream changes one, since a sync leaves `.github/` to the fork.
 - Rebuilds checked by upstream's own checks on the code they touch, and `verify` picked from upstream's CI so it covers what the patches change.
 - Release steps for apps that update themselves that sign for whatever the updater checks, with Electron as one example.

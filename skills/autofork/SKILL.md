@@ -21,7 +21,7 @@ npx github:AVGVSTVS96/autofork fork owner/repo --verify "<command that checks a 
 
 It follows upstream's releases, or its default branch if it has none. `--follow <branch>` picks a branch; `--follow 'v*-nightly.*'` picks a channel of releases by tag, and `init` lists the channels upstream publishes. It needs `gh` logged in. If `CLAUDE_CODE_OAUTH_TOKEN` is set, it also adds that secret; otherwise tell the user to run `claude setup-token` and `gh secret set CLAUDE_CODE_OAUTH_TOKEN`. In a fork that's already cloned, use `init owner/repo` instead.
 
-`verify` is the check a sync has to pass before it pushes, and the agent that rebuilds a patch runs it too. A patch that still applies but fails it is rebuilt like one that no longer applies. Take it from upstream's own CI: checks that cover the code the patches touch, pass on upstream as it is, and give the same answer every run. Set up what it needs in `.github/workflows/autofork.yml`, before the autofork step.
+`verify` is the check a sync has to pass before it pushes, and the agent that rebuilds a patch runs it too. A patch that still applies but fails it is rebuilt like one that no longer applies. Take it from upstream's own CI: checks that cover the code the patches touch, pass on upstream as it is (or, when upstream can't build on its own, like a package split out of a monorepo, with the patch that makes it build), and give the same answer every run. Install dependencies with `--setup "<command>"`, so `verify` is just the check, and set up the tools both need in `.github/workflows/autofork.yml`, before the autofork step. A patch that breaks `setup` is rebuilt the same way. List the files `setup` writes, like lockfiles, with `--generated <file>,<file>`: they stay out of patches and are rebuilt once the patches are in. All three are kept in `.autofork/config.json`.
 
 ## Change a fork
 
@@ -33,6 +33,8 @@ It follows upstream's releases, or its default branch if it has none. `--follow 
 Every source change must belong to a patch: once upstream moves, a sync refuses to rebuild while the fork has changes no patch holds, and `autofork status` lists them. To change an existing patch, edit the code, update its `PATCH.md` if the intent changed, and `save` the same id. When a change reaches code `verify` doesn't check, widen `verify` in `.autofork/config.json`.
 
 A patch can also be just a `PATCH.md`. Push it and the next sync has an agent build it.
+
+Patches go on in the alphabetical order of their ids, each on top of the ones before it. Give a patch the others need, like one that makes the project build on its own, an id that sorts first, like `0-standalone`.
 
 ## When upstream has a patch
 

@@ -1,8 +1,8 @@
 diff --git a/README.md b/README.md
-index bf2cb09f1180670046fc9c0ca8cf8578d11f99e6..878471ddf6809f61072c9ba0864def2440ef54f5 100644
+index e55b98e6c571830c9dac496db7359d32dc193ca1..0a3debae8f2e5a7e3968d85d50d21b2f3f28b243 100644
 --- a/README.md
 +++ b/README.md
-@@ -85,6 +85,10 @@ npx skills add AVGVSTVS96/autofork
+@@ -87,6 +87,10 @@ npx skills add AVGVSTVS96/autofork
  
  Your agent then knows how to fork a repo and keep its changes as patches.
  

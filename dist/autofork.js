@@ -27,6 +27,7 @@ var BOT = [
   "commit.gpgsign=false"
 ];
 var RED = ["failure", "timed_out", "action_required", "startup_failure"];
+var MARKER = /^(<{7} ours|>{7} theirs)\r?$/m;
 
 class Failure extends Error {
 }
@@ -81,6 +82,8 @@ async function readConfig(root) {
     throw new Failure("no .autofork/config.json here. Start with: autofork init <owner/repo>");
   }
   const config = JSON.parse(readFileSync(configFile(root), "utf8"));
+  if (config.generated?.length && !config.setup)
+    throw new Failure(`"generated" files are rebuilt by "setup", so set it too in ${DIR}/config.json`);
   const follow = config.follow ?? await defaultFollow(root, config.upstream);
   return {
     ...config,
@@ -91,9 +94,9 @@ async function readConfig(root) {
 function discover(root) {
   return readdirSync(join(root, DIR), { withFileTypes: true }).filter((entry) => entry.isDirectory() && existsSync(patchDoc(root, entry.name))).map((entry) => entry.name).sort();
 }
-function writeConfig(dir, { upstream, follow, verify, agent, green }) {
+function writeConfig(dir, { upstream, follow, setup, generated, verify, agent, green }) {
   mkdirSync(join(dir, DIR), { recursive: true });
-  writeFileSync(configFile(dir), `${JSON.stringify({ upstream, follow, verify, agent, green }, null, 2)}
+  writeFileSync(configFile(dir), `${JSON.stringify({ upstream, follow, setup, generated, verify, agent, green }, null, 2)}
 `);
   writeFileSync(join(dir, DIR, ".gitignore"), `!*.patch
 `);
@@ -204,10 +207,25 @@ function intent(root, id) {
     throw new Failure(`${DIR}/${id}/PATCH.md is empty: say what the patch does and why. It's what the agent rebuilds it from.`);
 }
 var isEmpty = (file) => !existsSync(file) || readFileSync(file).length === 0;
-function touched(dir, file) {
-  const stat = run("git", ["apply", "--numstat", file], dir);
-  return stat.ok ? stat.out.toString().trim().split(`
-`).filter(Boolean).map((line) => line.split("\t")[2]) : [];
+var sourcePaths = (config) => [
+  ...SOURCE,
+  ...(config.generated ?? []).map((path) => `:(exclude)${path}`)
+];
+var skipGenerated = (config) => (config.generated ?? []).map((path) => `--exclude=${path}`);
+function touched(dir, file, config) {
+  return run("git", ["apply", "--numstat", "-z", ...skipGenerated(config), file], dir).out.toString().split("\x00").filter(Boolean).map((line) => line.split("\t")[2]);
+}
+function unfinished({ conflicted, rejected, missed }, to, from) {
+  const files = [...conflicted, ...rejected, ...missed];
+  if (!files.length)
+    return "";
+  const left = [
+    conflicted.length ? `the conflict markers in ${conflicted.join(", ")}` : "",
+    rejected.length ? `the hunks that didn't fit, in ${rejected.map((path) => `${path}.rej`).join(", ")}` : "",
+    missed.length ? `the changes to ${missed.join(", ")}, which didn't apply at all` : ""
+  ].filter(Boolean);
+  const changes = from && from !== to ? ` To see what upstream changed under them: git diff ${from} ${to} -- ${files.join(" ")}` : "";
+  return ` Git applied the rest of it. What's left: ${left.join("; ")}.${changes}`;
 }
 function healPrompt(config, build, id, broken) {
   const before = config.patches.slice(0, config.patches.indexOf(id));
@@ -218,7 +236,7 @@ function healPrompt(config, build, id, broken) {
       `${DIR}/${id}/${id}.patch is how it was done before. Use it as a guide, not as text to force in.`
     ],
     "Build it on the current source, the smallest change that fully does what PATCH.md says. Build on what upstream has now: where upstream has its own version of what the patch touches, change that rather than bringing the old one back. Follow upstream's code and conventions, and leave everything else alone.",
-    `Run upstream's own checks for the code you touched${config.verify ? `, and \`${config.verify}\`, which the sync has to pass` : ""}. Fix what your change breaks. Patches after this one aren't applied yet.`,
+    `Run upstream's own checks for the code you touched${config.verify ? `, and \`${config.verify}\`, which the sync has to pass` : ""}.${config.setup ? ` Dependencies are installed: \`${config.setup}\` ran here, so run it again if you change them.` : ""} Fix what your change breaks. Patches after this one aren't applied yet.`,
     ...fresh ? [
       `Add a short paragraph to the end of ${DIR}/${id}/PATCH.md on why it's built the way it is, for whoever rebuilds it after upstream moves. Keep what's there as it is.`
     ] : []
@@ -230,8 +248,8 @@ This checkout is upstream at ${build.source}${before.length ? `, with ${before.j
 ${steps.map((step, index) => `${index + 1}. ${step}`).join(`
 `)}
 
-Don't edit anything ${fresh ? "else " : ""}in ${DIR}/ or .github/, and don't commit. Leave only your source change: remove anything your checks generated that git would pick up.
-If upstream already does what PATCH.md asks, or something close enough that building it would duplicate upstream's own version, change nothing and write one line saying what upstream does to ${DIR}/${id}/UPSTREAM.md.`;
+Don't edit anything ${fresh ? "else " : ""}in ${DIR}/ or .github/, and don't commit. Leave only your source change: remove anything your checks generated that git would pick up${config.generated?.length ? `, but leave ${config.generated.join(", ")}, which the sync rebuilds` : ""}.
+If upstream already does what PATCH.md asks, or something close enough that building it would duplicate upstream's own version, write one line saying what upstream does to ${DIR}/${id}/UPSTREAM.md, and the sync leaves the patch out.`;
 }
 var installed = (bin) => run("sh", ["-c", `command -v ${bin}`], ".").ok;
 function agentCommand(config) {
@@ -257,40 +275,58 @@ function workflowsBehind(root, base, source) {
   const upstreamChanged = new Set(files(base, source));
   return files("--diff-filter=MD", "HEAD", source).filter((file) => file && upstreamChanged.has(file));
 }
-var sameSource = (dir, ...commits) => run("git", ["diff", "--quiet", ...commits, "--", ...SOURCE], dir).ok;
-function changed(dir) {
-  return git(dir, "status", "--porcelain").length > 0;
-}
-function heal(config, build, id, broken) {
-  const prompt = healPrompt(config, build, id, broken);
+var sameSource = (config, dir, ...commits) => run("git", ["diff", "--quiet", ...commits, "--", ...sourcePaths(config)], dir).ok;
+function heal(config, build, id, broken, patch) {
+  prepared(config, build);
+  const step = build.steps.at(-1);
+  const left = patch ? merge(build.dir, patch.file, config) : undefined;
+  const rejects = left?.rejected.map((path) => `${path}.rej`) ?? [];
+  const before = workingTree(build.dir, rejects);
+  const prompt = healPrompt(config, build, id, broken + (left ? unfinished(left, build.source, patch?.from) : ""));
   const fresh = isEmpty(patchFile(build.dir, id));
   const [doing, done] = fresh ? ["building", "built"] : ["healing", "healed"];
   const doc = patchDoc(build.dir, id);
   const wish = readFileSync(doc, "utf8").trimEnd();
   let nudge = "";
-  for (let attempt = 1;attempt <= 2; attempt++) {
-    say(`${doing} ${id}${attempt > 1 ? " (second try)" : ""}`);
-    if (!shell(agentCommand(config), build.dir, prompt + nudge))
-      throw new Failure(`the agent failed while ${doing} ${id}`);
-    git(build.dir, "reset", "--soft", "--quiet", build.steps.at(-1));
-    const reason = existsSync(upstreamDoc(build.dir, id)) ? readFileSync(upstreamDoc(build.dir, id), "utf8").trim() : "";
-    const why = fresh && existsSync(doc) ? readFileSync(doc, "utf8") : "";
-    restoreControl(build.dir, build.steps.at(-1));
-    if (changed(build.dir)) {
-      if (why.startsWith(wish))
-        writeFileSync(doc, why);
-      build.healed.set(id, done);
-      return;
-    }
-    if (reason) {
-      build.upstreamHas.set(id, reason);
-      return;
-    }
-    nudge = `
+  let marked = [];
+  try {
+    for (let attempt = 1;attempt <= 2; attempt++) {
+      say(`${doing} ${id}${attempt > 1 ? " (second try)" : ""}`);
+      if (!shell(agentCommand(config), build.dir, prompt + nudge))
+        throw new Failure(`the agent failed while ${doing} ${id}`);
+      git(build.dir, "reset", "--soft", "--quiet", step);
+      const reason = existsSync(upstreamDoc(build.dir, id)) ? readFileSync(upstreamDoc(build.dir, id), "utf8").trim() : "";
+      const why = fresh && existsSync(doc) ? readFileSync(doc, "utf8") : "";
+      restoreControl(build.dir, step);
+      if (reason) {
+        reset(build.dir, step);
+        build.upstreamHas.set(id, reason);
+        return;
+      }
+      marked = (left?.conflicted ?? []).filter((path) => {
+        const file = join(build.dir, path);
+        return existsSync(file) && MARKER.test(readFileSync(file, "utf8"));
+      });
+      if (!marked.length && workingTree(build.dir, rejects) !== before) {
+        if (why.startsWith(wish))
+          writeFileSync(doc, why);
+        build.healed.set(id, done);
+        return;
+      }
+      nudge = marked.length ? `
+
+Your last attempt left conflict markers in ${marked.join(", ")}. Resolve them into what PATCH.md asks for.` : `
 
 Your last attempt exited without changing any source file. Build what PATCH.md asks for, or write ${DIR}/${id}/UPSTREAM.md if upstream already covers it.`;
+    }
+  } finally {
+    for (const file of rejects)
+      rmSync(join(build.dir, file), { force: true });
   }
-  throw new Failure(`the agent changed nothing while ${doing} ${id}`);
+  throw new Failure(marked.length ? `the agent left conflict markers in ${marked.join(", ")} while ${doing} ${id}` : `the agent changed nothing while ${doing} ${id}`);
+}
+function changed(dir) {
+  return git(dir, "status", "--porcelain").length > 0;
 }
 function commit(dir, message) {
   git(dir, "add", "-A");
@@ -301,11 +337,90 @@ function reset(dir, to = "HEAD") {
   git(dir, "reset", "--hard", "--quiet", to);
   git(dir, "clean", "-fdq");
 }
-function apply(dir, file) {
-  if (run("git", ["apply", "--3way", "--whitespace=nowarn", file], dir).ok)
+function apply(dir, file, config) {
+  if (run("git", ["apply", "--3way", "--whitespace=nowarn", ...skipGenerated(config), file], dir).ok)
     return true;
   reset(dir);
   return false;
+}
+function merge(dir, file, config) {
+  const left = { conflicted: [], rejected: [], missed: [] };
+  for (const path of touched(dir, file, config)) {
+    const only = [`--include=${path.replace(/[*?[\\]/g, "\\$&")}`, "--whitespace=nowarn", file];
+    if (run("git", ["apply", "--3way", ...only], dir).ok)
+      continue;
+    if (git(dir, "ls-files", "--unmerged", "--", `:(literal)${path}`))
+      left.conflicted.push(path);
+    else if (run("git", ["apply", "--reject", ...only], dir).ok)
+      continue;
+    else if (existsSync(join(dir, `${path}.rej`)))
+      left.rejected.push(path);
+    else
+      left.missed.push(path);
+  }
+  git(dir, "reset", "--quiet");
+  return left;
+}
+function prepare(config, build) {
+  if (!config.setup)
+    return true;
+  const head = git(build.dir, "rev-parse", "HEAD");
+  if (build.ready !== head) {
+    say(`setup: ${config.setup}`);
+    if (!succeeds(build, "setup", config.setup))
+      return false;
+    build.ready = head;
+    build.rebuilt = generatedChanges(config, build.dir);
+    reset(build.dir);
+  }
+  if (build.rebuilt && !git(build.dir, "status", "--porcelain", "--", ...config.generated ?? []))
+    git(build.dir, "apply", "--whitespace=nowarn", build.rebuilt);
+  return true;
+}
+function prepared(config, build) {
+  if (!prepare(config, build))
+    throw new Failure(`setup fails on ${short(git(build.dir, "rev-parse", "HEAD"))}: ${config.setup}`);
+}
+function generatedChanges(config, dir) {
+  if (!config.generated?.length)
+    return;
+  for (const path of config.generated)
+    run("git", ["add", "-A", "--", path], dir);
+  const diff = gitBytes(dir, "diff-index", "--cached", "-p", "--binary", "HEAD", "--", ...config.generated);
+  if (!diff.length)
+    return;
+  const file = join(git(dir, "rev-parse", "--path-format=absolute", "--git-dir"), "autofork-generated.patch");
+  writeFileSync(file, diff);
+  return file;
+}
+function regenerate(config, build) {
+  if (!config.generated?.length)
+    return;
+  prepared(config, build);
+  commit(build.dir, "generated");
+}
+function succeeds(build, check, command) {
+  const result = spawnSync("sh", ["-c", `exec 2>&1
+${command}`], {
+    cwd: build.dir,
+    stdio: ["inherit", "pipe", "inherit"],
+    maxBuffer: 1 << 30
+  });
+  process.stderr.write(result.stdout);
+  if (result.status === 0)
+    return true;
+  const lines = result.stdout.toString().trimEnd().split(`
+`).slice(-100).join(`
+`);
+  build.failed = { check, lines };
+  return false;
+}
+var passes = (config, build) => prepare(config, build) && (!config.verify || succeeds(build, "verify", config.verify));
+function stepPatch(config, build, step) {
+  const gitDir = git(build.dir, "rev-parse", "--path-format=absolute", "--git-dir");
+  const file = join(gitDir, `autofork-${step}.patch`);
+  writeFileSync(file, gitBytes(build.dir, "diff-tree", "-p", "--binary", "--full-index", `${step}~`, step, "--", ...sourcePaths(config)));
+  return file;
 }
 function scratch(root) {
   const parent = process.env.RUNNER_TEMP ?? join(homedir(), ".cache");
@@ -338,30 +453,49 @@ function build(root, config, base, options) {
   };
   for (const id of config.patches) {
     const file = patchFile(dir, id);
-    if (isEmpty(file) ? options.healFrom : !apply(dir, file)) {
+    if (options.wait && !options.healFrom && isEmpty(file))
+      throw new Drifted(`${id} isn't built yet`);
+    if (isEmpty(file) ? options.healFrom : !apply(dir, file, config)) {
       if (!options.healFrom)
         throw new Drifted(`${id} doesn't apply to ${short(base)}`);
       verify(config, build, options.healFrom);
-      const files = touched(dir, file);
-      const changes = options.healFrom !== base && files.length ? ` To see what upstream changed under it: git diff ${options.healFrom} ${base} -- ${files.join(" ")}` : "";
-      heal(config, build, id, `Upstream changed, and patch "${id}" no longer applies.${changes}`);
+      heal(config, build, id, `Upstream changed, and patch "${id}" no longer applies cleanly.`, isEmpty(file) ? undefined : { file, from: options.healFrom });
     } else if (!isEmpty(file) && !changed(dir)) {
       build.upstreamHas.set(id, "the same change, line for line");
     }
-    if (options.fold?.id === id && !apply(dir, options.fold.patch)) {
+    if (options.fold?.id === id && !apply(dir, options.fold.patch, config)) {
       throw new Failure(`your changes don't apply on top of ${id}`);
     }
     build.steps.push(commit(dir, id));
   }
   return build;
 }
-function bisect(config, build, command) {
+function verifies(config, build, step, from) {
+  const failed = build.failed;
+  reset(build.dir, build.steps[step]);
+  if (passes(config, build))
+    return true;
+  if (step > 0 || !from)
+    return false;
+  const { check } = build.failed;
+  let broke = !config.patches.length;
+  if (!broke && from !== build.source) {
+    say(`verify with upstream ${short(from)} alone, where the fork was`);
+    reset(build.dir, from);
+    broke = passes(config, build);
+  }
+  if (broke)
+    throw new Failure(`${check} fails on upstream ${short(build.source)} itself: ${config[check]}`);
+  say(`${check} fails on upstream alone where the fork was too, so the patches are what make it pass`);
+  build.failed = failed;
+  return true;
+}
+function bisect(config, build, from) {
   let bad = build.steps.length;
   while (bad - build.verified > 1) {
     const step = Math.floor((build.verified + bad) / 2);
     say(`verify with ${step ? `the patches up to ${config.patches[step - 1]}` : "upstream alone"}`);
-    reset(build.dir, build.steps[step]);
-    if (shell(command, build.dir))
+    if (verifies(config, build, step, from))
       build.verified = step;
     else
       bad = step;
@@ -370,44 +504,50 @@ function bisect(config, build, command) {
 }
 function restack(config, build, index, from) {
   const culprit = config.patches[index];
-  const [, ...later] = build.steps.splice(index + 1);
+  const { check, lines } = build.failed;
+  const [built, ...later] = build.steps.splice(index + 1);
   reset(build.dir, build.steps[index]);
-  const changes = from !== build.source ? ` To see what upstream changed: git diff --stat ${from} ${build.source}` : "";
-  heal(config, build, culprit, `Patch "${culprit}" still applies cleanly, but the sync's check fails with it, so it's left out here.${changes}`);
+  const changes = from !== build.source ? `
+
+To see what upstream changed: git diff --stat ${from} ${build.source}` : "";
+  heal(config, build, culprit, `Patch "${culprit}" still applies cleanly, and it's applied here, but \`${config[check]}\` fails with it. Its last lines:
+
+\`\`\`
+${lines}
+\`\`\`${changes}`, { file: stepPatch(config, build, built) });
   build.steps.push(commit(build.dir, culprit));
   later.forEach((step, offset) => {
     const id = config.patches[index + 1 + offset];
-    if (!run("git", ["cherry-pick", "--no-commit", step], build.dir).ok) {
-      reset(build.dir);
+    const file = stepPatch(config, build, step);
+    if (!isEmpty(file) && !apply(build.dir, file, config)) {
       verify(config, build, from);
-      heal(config, build, id, `Patch "${id}" no longer applies on top of ${culprit}, which was just rebuilt.`);
-    } else if (sameSource(build.dir, "HEAD") && !sameSource(build.dir, `${step}~`, step)) {
+      heal(config, build, id, `Patch "${id}" no longer applies cleanly on top of ${culprit}, which was just rebuilt.`, { file });
+    } else if (sameSource(config, build.dir, "HEAD") && !sameSource(config, build.dir, `${step}~`, step)) {
       throw new Failure(`rebuilding ${culprit} also made the change ${id} makes, so ${id} has nothing left to add and nothing was pushed: say in their PATCH.md files which patch makes which change, or merge them into one`);
     }
     build.steps.push(commit(build.dir, id));
   });
 }
 function verify(config, build, from) {
-  const command = config.verify;
-  if (!command)
+  if (!config.setup && !config.verify)
     return;
-  while (!shell(command, build.dir)) {
+  while (!verifies(config, build, build.steps.length - 1, from)) {
     if (!from)
-      throw new Drifted("verify fails, so a patch needs rebuilding");
-    say("verify failed, finding the patch it fails on");
-    const step = bisect(config, build, command);
+      throw new Drifted(`${build.failed.check} fails, so a patch needs rebuilding`);
+    say(`${build.failed.check} failed, finding the patch it fails on`);
+    const step = bisect(config, build, from);
     if (step === build.steps.length) {
-      say("verify passed when run again");
+      say(`${build.failed.check} passed when run again`);
       break;
     }
-    if (step === 0)
-      throw new Failure(`verify fails on upstream ${short(build.source)} itself: ${command}`);
+    const failing = build.failed.check;
+    const command = config[failing];
     const id = config.patches[step - 1];
     if (run("git", ["diff", "--quiet", build.steps[step - 1], build.steps[step]], build.dir).ok) {
-      throw new Failure(`verify passes and fails on the same code, so the sync can't tell which patch breaks it: ${command}`);
+      throw new Failure(`${failing} passes and fails on the same code, so the sync can't tell which patch breaks it: ${command}`);
     }
     if (build.healed.has(id))
-      throw new Failure(`verify fails with ${id}, which the agent ${build.healed.get(id)}: ${command}`);
+      throw new Failure(`${failing} fails with ${id}, which the agent ${build.healed.get(id)}: ${command}`);
     restack(config, build, step - 1, from);
   }
   build.verified = build.steps.length - 1;
@@ -415,7 +555,7 @@ function verify(config, build, from) {
 }
 function refresh(target, config, build) {
   config.patches.forEach((id, index) => {
-    const diff = gitBytes(build.dir, "diff-tree", "-p", "--binary", "--full-index", build.steps[index], build.steps[index + 1], "--", ...SOURCE);
+    const diff = gitBytes(build.dir, "diff-tree", "-p", "--binary", "--full-index", build.steps[index], build.steps[index + 1], "--", ...sourcePaths(config));
     if (diff.length || existsSync(patchFile(target, id)))
       writeFileSync(patchFile(target, id), diff);
   });
@@ -433,12 +573,12 @@ function cleanup(root, build) {
   if (build)
     run("git", ["worktree", "remove", "--force", build.dir], root);
 }
-function workingTree(root) {
+function workingTree(root, skip = []) {
   const gitDir = git(root, "rev-parse", "--path-format=absolute", "--git-dir");
   const index = join(gitDir, "autofork-index");
   const env = { ...process.env, GIT_INDEX_FILE: index };
-  cpSync(join(gitDir, "index"), index);
-  gitWith(root, env, "add", "-A");
+  cpSync(join(gitDir, "index"), index, { preserveTimestamps: true });
+  gitWith(root, env, "add", "-A", "--", ".", ...skip.map((path) => `:(exclude,literal)${path}`));
   const tree = gitWith(root, env, "write-tree");
   rmSync(index, { force: true });
   return tree;
@@ -446,7 +586,7 @@ function workingTree(root) {
 function check(root, config, against, base = baseline(root)) {
   const rebuilt = build(root, config, base, {});
   try {
-    const drift = git(root, "diff-tree", "-r", "--name-only", rebuilt.steps.at(-1), against, "--", ...SOURCE);
+    const drift = git(root, "diff-tree", "-r", "--name-only", rebuilt.steps.at(-1), against, "--", ...sourcePaths(config));
     return { base, rebuilt: rebuilt.steps.at(-1), drift: drift.split(`
 `).filter(Boolean) };
   } finally {
@@ -484,8 +624,9 @@ Save them as a patch first: write ${DIR}/<id>/PATCH.md, then run autofork save <
   let result;
   try {
     try {
-      result = build(root, config, source, { healFrom });
+      result = build(root, config, source, { healFrom, wait: true });
       verify(config, result, healFrom);
+      regenerate(config, result);
     } catch (error) {
       if (!(error instanceof Drifted))
         throw error;
@@ -533,7 +674,7 @@ async function save(root, args) {
   if (!drift.length)
     return say(`nothing to save: your code matches what the patches build. Push ${DIR}/${id}/PATCH.md as it is and the next sync has an agent build it.`);
   const fold = join(git(root, "rev-parse", "--path-format=absolute", "--git-dir"), "autofork-fold.patch");
-  writeFileSync(fold, gitBytes(root, "diff-tree", "-p", "--binary", "--full-index", rebuilt, files, "--", ...SOURCE));
+  writeFileSync(fold, gitBytes(root, "diff-tree", "-p", "--binary", "--full-index", rebuilt, files, "--", ...sourcePaths(config)));
   const result = build(root, config, base, { fold: { id, patch: fold } });
   try {
     refresh(root, config, result);
@@ -568,17 +709,24 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
-      # Set up whatever your verify command needs here (node, bun, rust, ...).
+      # Set up the tools your setup and verify commands need here (node, bun, rust, ...).
       - id: autofork
         uses: AVGVSTVS96/autofork@v1
         env:
           CLAUDE_CODE_OAUTH_TOKEN: \${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
 `;
-async function setup(root, upstream, args) {
+function options(args) {
+  const setup = flag(args, "--setup");
+  const generated = flag(args, "--generated")?.split(",");
+  if (generated && !setup)
+    throw new Failure("--generated files are rebuilt by --setup, so set it too");
+  return { follow: flag(args, "--follow"), setup, generated, verify: flag(args, "--verify") };
+}
+async function setup(root, upstream, chosen) {
   if (existsSync(configFile(root)))
     throw new Failure(`${DIR}/config.json already exists`);
-  const follow = flag(args, "--follow") ?? await defaultFollow(root, upstream);
-  const config = { upstream, follow, verify: flag(args, "--verify") };
+  const follow = chosen.follow ?? await defaultFollow(root, upstream);
+  const config = { ...chosen, upstream, follow };
   writeConfig(root, config);
   const path = join(root, ".github/workflows/autofork.yml");
   mkdirSync(join(root, ".github/workflows"), { recursive: true });
@@ -590,7 +738,7 @@ async function setup(root, upstream, args) {
   const inherited = git(root, "ls-files", ".github/workflows").split(`
 `).filter((file) => file && !file.endsWith("/autofork.yml"));
   if ("branch" in parseFollow(follow)) {
-    say(`autofork follows ${upstream}'s ${follow} branch${flag(args, "--follow") ? "" : ", since it has no releases"}.`);
+    say(`autofork follows ${upstream}'s ${follow} branch${chosen.follow ? "" : ", since it has no releases"}.`);
   } else {
     const others = (await channels(upstream)).filter((channel) => channel !== follow);
     say(`autofork follows ${upstream}'s ${follow === "releases" ? "" : `${follow} `}releases.`);
@@ -665,19 +813,20 @@ function claim(root, upstream) {
 }
 async function init(root, args) {
   if (!args[0])
-    throw new Failure("usage: autofork init <owner/repo | git url> [--follow <releases | channel | branch>] [--verify <command>]");
-  await setup(root, args[0], args);
+    throw new Failure("usage: autofork init <owner/repo | git url> [--follow <releases | channel | branch>] [--setup <command>] [--generated <files>] [--verify <command>]");
+  await setup(root, args[0], options(args));
   claim(root, args[0]);
   say("Add a CLAUDE_CODE_OAUTH_TOKEN secret (claude setup-token), commit, and push.");
 }
 async function fork(cwd, args) {
   const upstream = args[0];
   if (!/^[\w.-]+\/[\w.-]+$/.test(upstream ?? ""))
-    throw new Failure("usage: autofork fork <owner/repo> [--follow <releases | channel | branch>] [--verify <command>]");
+    throw new Failure("usage: autofork fork <owner/repo> [--follow <releases | channel | branch>] [--setup <command>] [--generated <files>] [--verify <command>]");
+  const chosen = options(args);
   if (!run("gh", ["repo", "fork", upstream, "--clone", "--default-branch-only"], cwd).ok)
     throw new Failure("gh couldn't fork it. Is the GitHub CLI installed and logged in?");
   const root = join(cwd, upstream.split("/")[1]);
-  const readme = await setup(root, upstream, args);
+  const readme = await setup(root, upstream, chosen);
   claim(root, upstream);
   const repo = origin(root);
   const token = process.env.CLAUDE_CODE_OAUTH_TOKEN;
@@ -720,6 +869,9 @@ Options for fork and init:
                                 by tag, like 'v*-nightly.*', or a branch.
                                 Default: releases, or the default branch if
                                 upstream has none
+  --setup <command>             the command that installs dependencies
+  --generated <files>           files setup writes, like lockfiles, comma
+                                separated: rebuilt by setup, never patched
   --verify <command>            the command that checks a build
 
 A patch is .autofork/<id>/PATCH.md, saying what the change does and why, next

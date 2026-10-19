@@ -155,8 +155,10 @@ test("a drifted patch waits for a run that heals", () => {
   expect(sh(fork, "git rev-parse HEAD")).toBe(head);
 });
 
-test("a drifted patch is healed from its PATCH.md", () => {
-  agent(`sed -i 's/"hi " + name;/"hi " + name.toUpperCase();/' app.js`);
+test("a drifted patch is healed from git's conflict markers and its PATCH.md", () => {
+  agent(
+    `grep -q '^<<<<<<< ours' app.js || exit 1\nprintf 'export function greet(name) {\\n  return "hi " + name.toUpperCase();\\n}\\n' > app.js`,
+  );
   const { ok, log } = autofork(fork, "sync");
   expect(ok).toBe(true);
   expect(log).toContain("healing shout");
@@ -236,6 +238,16 @@ test("a patch that's only a PATCH.md is built by the agent", () => {
   patch("wave", "greet() waves at the end.");
   sh(fork, "git add -A && git commit -qm wave");
   expect(autofork(fork, "status").log).toContain("wave  (not built yet)");
+  const head = sh(fork, "git rev-parse HEAD");
+  const waiting = autofork(fork, "sync", "--no-heal");
+  expect(waiting.ok).toBe(true);
+  expect(waiting.log).toContain("wave isn't built yet. The next run that heals rebuilds it.");
+  expect(waiting.output.result).toBe("waiting");
+  expect(sh(fork, "git rev-parse HEAD")).toBe(head);
+  write(upstream, "notes.txt", "wave pending\n");
+  sh(upstream, "git commit -qam notes");
+  expect(autofork(fork, "sync", "--no-heal").output.result).toBe("waiting");
+  expect(sh(fork, "git rev-parse HEAD")).toBe(head);
   agent(
     `sed -i 's/ + "!";/ + "! o\\/";/' app.js\nprintf '\\nThe wave is text, so it works in any terminal.\\n' >> .autofork/wave/PATCH.md`,
   );
@@ -598,7 +610,7 @@ test("verify keeps failing on a patch the agent rebuilt, and the sync fails inst
   );
   checkedAgent({
     "b-shout": `printf 'import { who } from "./name.js";\\nexport const shout = () => who().toUpperCase();\\n' > extra.js`,
-    "c-wave": `sed -i 's/{ who }/{ whom }/; s/who();/whom() + " o\\/";/' app.js`,
+    "c-wave": `printf 'import { whom } from "./name.js";\\nexport const greet = () => "hello " + whom() + " o/";\\n' > app.js`,
   });
   const { ok, log } = autofork(checkedFork, "sync");
   expect(ok).toBe(false);
@@ -609,7 +621,7 @@ test("verify keeps failing on a patch the agent rebuilt, and the sync fails inst
 test("a patch that still applies but fails verify is rebuilt before the agent builds a later patch on top of it", () => {
   checkedAgent({
     "b-shout": `printf 'import { who } from "./name.js";\\nexport const shout = () => who().toUpperCase();\\n' > extra.js`,
-    "c-wave": `sed -i 's/who();/who() + " o\\/";/' app.js`,
+    "c-wave": `printf 'import { who } from "./name.js";\\nexport const greet = () => "hello " + who() + " o/";\\n' > app.js`,
   });
   const { ok, log } = autofork(checkedFork, "sync");
   expect(ok).toBe(true);
@@ -617,8 +629,9 @@ test("a patch that still applies but fails verify is rebuilt before the agent bu
   expect(log).toContain("healed b-shout\nhealed c-wave");
   expect(file(home, "agent-runs.log")).toBe("b-shout\nc-wave\n");
   expect(file(home, "prompt-b-shout.txt")).toContain(
-    `with a-notes already applied. Patch "b-shout" still applies cleanly, but the sync's check fails with it, so it's left out here.`,
+    `with a-notes already applied. Patch "b-shout" still applies cleanly, and it's applied here, but \`${loads}\` fails with it. Its last lines:`,
   );
+  expect(file(home, "prompt-b-shout.txt")).toContain("does not provide an export named 'name'");
   expect(file(checkedFork, "extra.js")).toContain("who().toUpperCase()");
   expect(file(checkedFork, "app.js")).toContain('who() + " o/"');
   expect(file(checkedFork, "notes.txt")).toBe("mine\n");
@@ -687,16 +700,16 @@ test("each patch that fails verify is rebuilt before the agent rebuilds a later 
   sh(checked, "git commit -qam 'who is whom now'");
   checkedAgent({
     "b-shout": `printf 'import { whom } from "./name.js";\\nexport const shout = () => whom().toUpperCase();\\n' > extra.js`,
-    "c-wave": `sed -i 's/whom();/whom() + " o\\/";/' app.js`,
+    "c-wave": `printf 'import { whom } from "./name.js";\\nexport const greet = () => "hello " + whom() + " o/";\\n' > app.js`,
     "f-wink": `printf 'import { whom } from "./name.js";\\nexport const wink = () => whom() + " ;)";\\n' > wink.js`,
-    "g-loud": `sed -i 's/toUpperCase();/toUpperCase() + "!";/' extra.js`,
+    "g-loud": `printf 'import { whom } from "./name.js";\\nexport const shout = () => whom().toUpperCase() + "!";\\n' > extra.js`,
   });
   const { ok, log } = autofork(checkedFork, "sync");
   expect(ok).toBe(true);
   expect(log).toContain("healed b-shout\nhealed c-wave\nhealed f-wink\nhealed g-loud");
   expect(file(home, "agent-runs.log")).toBe("b-shout\nc-wave\nf-wink\ng-loud\n");
   expect(file(home, "prompt-f-wink.txt")).toContain(
-    `Patch "f-wink" still applies cleanly, but the sync's check fails with it, so it's left out here.`,
+    `Patch "f-wink" still applies cleanly, and it's applied here, but \`${loads}\` fails with it.`,
   );
   expect(file(checkedFork, "extra.js")).toContain('whom().toUpperCase() + "!"');
   expect(file(checkedFork, "wink.js")).toContain('whom() + " ;)"');
@@ -786,7 +799,7 @@ test("a patch rebuilt for verify gets the patches after it back, and one that no
     {
       "a-loud": `printf 'import { whom } from "./name.js";\\nexport const loud = () => whom().toUpperCase();\\n' > loud.js`,
       "b-wink": `printf 'import { whom } from "./name.js";\\nexport const wink = () => whom() + " ;)";\\n' > wink.js`,
-      "c-louder": `sed -i 's/toUpperCase();/toUpperCase() + "!";/' loud.js`,
+      "c-louder": `printf 'import { whom } from "./name.js";\\nexport const loud = () => whom().toUpperCase() + "!";\\n' > loud.js`,
     },
     mine,
   );
@@ -795,7 +808,7 @@ test("a patch rebuilt for verify gets the patches after it back, and one that no
   expect(log).toContain("healed a-loud\nhealed b-wink\nhealed c-louder");
   expect(file(home, "agent-runs.log")).toBe("a-loud\nb-wink\nc-louder\n");
   expect(file(home, "prompt-c-louder.txt")).toContain(
-    'with a-loud, b-wink already applied. Patch "c-louder" no longer applies on top of a-loud, which was just rebuilt.',
+    `with a-loud, b-wink already applied. Patch "c-louder" no longer applies cleanly on top of a-loud, which was just rebuilt. Git applied the rest of it. What's left: the conflict markers in loud.js.`,
   );
   expect(file(mine, "loud.js")).toBe(
     'import { whom } from "./name.js";\nexport const loud = () => whom().toUpperCase() + "!";\n',
@@ -846,5 +859,356 @@ test("a patch rebuilt for verify that also makes a later patch's change fails th
     "rebuilding a-loud also made the change b-notes makes, so b-notes has nothing left to add",
   );
   expect(file(home, "agent-runs.log")).toBe("a-loud\n");
+  expect(sh(mine, "git rev-parse HEAD")).toBe(head);
+});
+
+test("a patch that no longer applies keeps what git could apply, and the agent gets only what's left", () => {
+  const origin = join(home, "partial");
+  const mine = join(home, "partial-fork");
+  const lines = Array.from({ length: 20 }, (_, index) => `l${index + 1}`);
+  mkdirSync(origin);
+  write(origin, "one.txt", "1\n2\n3\n");
+  write(origin, "two.txt", "a\nb\nc\n");
+  write(origin, "three.txt", "x\n");
+  write(origin, "four.txt", `${lines.join("\n")}\n`);
+  sh(origin, "git init -q && git add -A && git commit -qm init");
+  sh(home, `git clone -q ${origin} partial-fork`);
+  expect(autofork(mine, "init", origin).ok).toBe(true);
+  sh(mine, "git add -A && git commit -qm 'track upstream'");
+  savePatch(
+    "edit",
+    "Each file says it's mine.",
+    () => {
+      write(mine, "one.txt", "1\nTWO\n3\n");
+      write(mine, "two.txt", "a\nB\nc\n");
+      write(mine, "three.txt", "y\n");
+      write(
+        mine,
+        "four.txt",
+        `${lines.join("\n").replace("l2\n", "L2\n").replace("l19", "L19")}\n`,
+      );
+    },
+    mine,
+  );
+  const saved = join(mine, ".autofork/edit/edit.patch");
+  writeFileSync(
+    saved,
+    readFileSync(saved, "utf8").replace(/(?<=four\.txt\nindex )[0-9a-f]{40}/, "1111111"),
+  );
+  sh(mine, "git commit -qam 'four.txt from a commit this clone never had'");
+  write(origin, "one.txt", "1\ndeux\n3\n");
+  write(origin, "four.txt", `${lines.join("\n").replace("l2\n", "el2\n")}\n`);
+  sh(origin, "git rm -q three.txt && git commit -qam 'upstream moves'");
+  checkedAgent(
+    {
+      edit: `grep -q '^<<<<<<< ours' one.txt && test -f four.txt.rej || exit 1; printf '1\\nTWO\\n3\\n' > one.txt; sed -i 's/^el2$/L2/' four.txt`,
+    },
+    mine,
+  );
+  const { ok, log } = autofork(mine, "sync");
+  expect(ok).toBe(true);
+  expect(log).toContain("healed edit");
+  const prompt = file(home, "prompt-edit.txt");
+  expect(prompt).toContain(
+    "What's left: the conflict markers in one.txt; the hunks that didn't fit, in four.txt.rej; the changes to three.txt, which didn't apply at all.",
+  );
+  expect(prompt).toMatch(/git diff \w+ \w+ -- one\.txt four\.txt three\.txt$/m);
+  expect(prompt).not.toContain("two.txt");
+  expect(file(mine, "one.txt")).toBe("1\nTWO\n3\n");
+  expect(file(mine, "two.txt")).toBe("a\nB\nc\n");
+  expect(file(mine, "four.txt")).toContain("L2\n");
+  expect(file(mine, "four.txt")).toContain("L19\n");
+  expect(existsSync(join(mine, "three.txt"))).toBe(false);
+  expect(existsSync(join(mine, "four.txt.rej"))).toBe(false);
+  expect(file(mine, ".autofork/edit/edit.patch")).toContain("+B");
+  expect(file(mine, ".autofork/edit/edit.patch")).toContain("+L19");
+});
+
+test("setup installs before the agent and verify run, and generated files are rebuilt instead of patched", () => {
+  const origin = join(home, "deps");
+  const mine = join(home, "deps-fork");
+  const setup =
+    "mkdir -p deps && cp package.json deps/ && sed 's/^/locked /' package.json > lock.txt";
+  mkdirSync(origin);
+  write(origin, ".gitignore", "deps/\n");
+  write(origin, "package.json", '{\n  "a": "1"\n}\n');
+  sh(origin, `git init -q && ${setup} && git add -A && git commit -qm init`);
+  sh(home, `git clone -q ${origin} deps-fork`);
+  expect(autofork(mine, "init", origin, "--verify", "cmp package.json deps/package.json").ok).toBe(
+    true,
+  );
+  sh(mine, "git add -A && git commit -qm 'track upstream'");
+  savePatch(
+    "dep-b",
+    "The app depends on b.",
+    () => {
+      write(mine, "package.json", '{\n  "a": "1",\n  "b": "1"\n}\n');
+      sh(mine, setup);
+    },
+    mine,
+  );
+  expect(file(mine, ".autofork/dep-b/dep-b.patch")).toContain("lock.txt");
+  const config = JSON.parse(file(mine, ".autofork/config.json"));
+  write(
+    mine,
+    ".autofork/config.json",
+    `${JSON.stringify({ ...config, generated: ["lock.txt"] }, null, 2)}\n`,
+  );
+  expect(autofork(mine, "status").log).toContain('"generated" files are rebuilt by "setup"');
+  write(
+    mine,
+    ".autofork/config.json",
+    `${JSON.stringify({ ...config, setup, generated: ["lock.txt"] }, null, 2)}\n`,
+  );
+  sh(mine, "git commit -qam 'lock.txt is generated'");
+  write(origin, "package.json", '{\n  "a": "1",\n  "c": "1"\n}\n');
+  sh(origin, `${setup} && git commit -qam 'depend on c'`);
+  checkedAgent(
+    {
+      "dep-b": `grep -q '^<<<<<<< ours' package.json && test -f deps/package.json || exit 1; printf '{\\n  "a": "1",\\n  "b": "1",\\n  "c": "1"\\n}\\n' > package.json`,
+    },
+    mine,
+  );
+  const { ok, log } = autofork(mine, "sync");
+  expect(ok).toBe(true);
+  expect(log).toContain("healed dep-b");
+  const prompt = file(home, "prompt-dep-b.txt");
+  expect(prompt).toContain(`Dependencies are installed: \`${setup}\` ran here`);
+  expect(prompt).toContain("What's left: the conflict markers in package.json.");
+  expect(prompt).toContain("that git would pick up, but leave lock.txt, which the sync rebuilds.");
+  expect(prompt).toContain(" -- package.json\n");
+  expect(file(mine, "lock.txt")).toBe(
+    'locked {\nlocked   "a": "1",\nlocked   "b": "1",\nlocked   "c": "1"\nlocked }\n',
+  );
+  expect(file(mine, ".autofork/dep-b/dep-b.patch")).not.toContain("lock.txt");
+  expect(sh(mine, "git status --porcelain")).toBe("");
+  write(origin, "notes.txt", "one\n");
+  sh(origin, "git add -A && git commit -qm notes");
+  checkedAgent({}, mine);
+  const again = autofork(mine, "sync");
+  expect(again.output.result).toBe("synced");
+  expect(file(home, "agent-runs.log")).toBe("");
+  expect(file(mine, "lock.txt")).toContain('locked   "b": "1",');
+});
+
+test("a patch rebuilt for verify keeps a later patch upstream merged as is paused, without the agent", () => {
+  const origin = join(home, "merged-later");
+  const mine = join(home, "merged-later-fork");
+  mkdirSync(origin);
+  write(origin, "name.js", 'export const who = () => "world";\n');
+  write(origin, "notes.txt", "one\n");
+  sh(origin, "git init -q && git add -A && git commit -qm init");
+  sh(home, `git clone -q ${origin} merged-later-fork`);
+  expect(autofork(mine, "init", origin, "--verify", loads).ok).toBe(true);
+  sh(mine, "git add -A && git commit -qm 'track upstream'");
+  savePatch(
+    "a-loud",
+    "loud.js has loud(), the name in upper case.",
+    () =>
+      write(
+        mine,
+        "loud.js",
+        'import { who } from "./name.js";\nexport const loud = () => who().toUpperCase();\n',
+      ),
+    mine,
+  );
+  savePatch(
+    "b-notes",
+    "notes.txt has a second line.",
+    () => write(mine, "notes.txt", "one\ntwo\n"),
+    mine,
+  );
+  write(origin, "name.js", 'export const whom = () => "world";\n');
+  write(origin, "notes.txt", "one\ntwo\n");
+  sh(origin, "git commit -qam 'who is whom now, and notes has two lines'");
+  checkedAgent(
+    {
+      "a-loud": `printf 'import { whom } from "./name.js";\\nexport const loud = () => whom().toUpperCase();\\n' > loud.js`,
+    },
+    mine,
+  );
+  const { ok, log } = autofork(mine, "sync");
+  expect(ok).toBe(true);
+  expect(log).toContain("healed a-loud\nupstream has b-notes: the same change, line for line");
+  expect(file(home, "agent-runs.log")).toBe("a-loud\n");
+  expect(sh(mine, "ls .autofork/b-notes")).toBe("PATCH.md\nUPSTREAM.md");
+});
+
+test("verify sees the generated files setup rebuilt for the patches under it", () => {
+  const origin = join(home, "locked");
+  const mine = join(home, "locked-fork");
+  const setup = "sed 's/^/locked /' package.json > lock.txt";
+  mkdirSync(origin);
+  write(origin, "package.json", '{\n  "a": "1"\n}\n');
+  sh(origin, `git init -q && ${setup} && git add -A && git commit -qm init`);
+  sh(home, `git clone -q ${origin} locked-fork`);
+  const verify = "sed 's/^/locked /' package.json | cmp - lock.txt";
+  const unset = autofork(mine, "init", origin, "--generated", "lock.txt", "--verify", verify);
+  expect(unset.log).toContain("--generated files are rebuilt by --setup, so set it too");
+  expect(existsSync(join(mine, ".autofork"))).toBe(false);
+  expect(
+    autofork(
+      mine,
+      "init",
+      origin,
+      "--setup",
+      setup,
+      "--generated",
+      "lock.txt,other.lock",
+      "--verify",
+      verify,
+    ).ok,
+  ).toBe(true);
+  const config = JSON.parse(file(mine, ".autofork/config.json"));
+  expect(config).toMatchObject({ setup, generated: ["lock.txt", "other.lock"], verify });
+  sh(mine, "git add -A && git commit -qm 'track upstream'");
+  savePatch(
+    "dep-b",
+    "The app depends on b.",
+    () => {
+      write(mine, "package.json", '{\n  "a": "1",\n  "b": "1"\n}\n');
+      sh(mine, setup);
+    },
+    mine,
+  );
+  expect(file(mine, ".autofork/dep-b/dep-b.patch")).not.toContain("lock.txt");
+  write(origin, "notes.txt", "one\n");
+  sh(origin, "git add -A && git commit -qm notes");
+  checkedAgent({}, mine);
+  const { ok, output } = autofork(mine, "sync");
+  expect(ok).toBe(true);
+  expect(output.result).toBe("synced");
+  expect(file(home, "agent-runs.log")).toBe("");
+  expect(file(mine, "lock.txt")).toContain('locked   "b": "1"');
+});
+
+function breaksSetup(name: string, verify?: string) {
+  const origin = join(home, name);
+  const mine = join(home, `${name}-fork`);
+  const setup = `while read d; do test -f "pkgs/$d" || { echo "no package $d"; exit 1; }; done < deps.txt`;
+  mkdirSync(join(origin, "pkgs"), { recursive: true });
+  write(origin, "deps.txt", "a\n");
+  write(origin, "pkgs/a", "");
+  write(origin, "pkgs/b", "");
+  sh(origin, "git init -q && git add -A && git commit -qm init");
+  sh(home, `git clone -q ${origin} ${name}-fork`);
+  expect(autofork(mine, "init", origin, ...(verify ? ["--verify", verify] : [])).ok).toBe(true);
+  const config = JSON.parse(file(mine, ".autofork/config.json"));
+  write(mine, ".autofork/config.json", `${JSON.stringify({ ...config, setup }, null, 2)}\n`);
+  sh(mine, "git add -A && git commit -qm 'track upstream'");
+  savePatch("dep-b", "The app depends on b.", () => write(mine, "deps.txt", "a\nb\n"), mine);
+  sh(origin, "git mv pkgs/b pkgs/bee && git commit -qm 'b is bee now'");
+  checkedAgent({ "dep-b": `printf 'a\\nbee\\n' > deps.txt` }, mine);
+  const waiting = autofork(mine, "sync", "--no-heal");
+  expect(waiting.output.result).toBe("waiting");
+  expect(waiting.log).toContain("setup fails, so a patch needs rebuilding");
+  const { ok, log } = autofork(mine, "sync");
+  expect(ok).toBe(true);
+  expect(log).toContain("healed dep-b");
+  expect(file(home, "agent-runs.log")).toBe("dep-b\n");
+  const prompt = file(home, "prompt-dep-b.txt");
+  expect(prompt).toContain(`but \`${setup}\` fails with it. Its last lines:`);
+  expect(prompt).toContain("no package b");
+  expect(file(mine, "deps.txt")).toBe("a\nbee\n");
+}
+
+test("a patch that still applies but breaks setup is rebuilt like one that fails verify", () =>
+  breaksSetup("installs", "test -f deps.txt"));
+
+test("setup without verify is the check a sync has to pass", () => breaksSetup("installs-only"));
+
+test("a patch the build needs is rebuilt when verify fails with it, even though upstream alone never passes verify", () => {
+  const origin = join(home, "split");
+  const mine = join(home, "split-fork");
+  mkdirSync(origin);
+  write(
+    origin,
+    "app.js",
+    'import { who } from "./lib/name.js";\nexport const greet = () => "hello " + who();\n',
+  );
+  write(origin, "notes.txt", "one\n");
+  sh(origin, "git init -q && git add -A && git commit -qm init");
+  sh(home, `git clone -q ${origin} split-fork`);
+  expect(autofork(mine, "init", origin, "--verify", loads).ok).toBe(true);
+  sh(mine, "git add -A && git commit -qm 'track upstream'");
+  savePatch(
+    "a-standalone",
+    "lib/name.js stands in for the monorepo's name package, so the app builds on its own.",
+    () => {
+      mkdirSync(join(mine, "lib"));
+      write(mine, "lib/name.js", 'export const who = () => "world";\n');
+      write(mine, "notes.txt", "one\nstandalone\n");
+    },
+    mine,
+  );
+  savePatch(
+    "b-shout",
+    "extra.js has shout(), the name in upper case.",
+    () =>
+      write(
+        mine,
+        "extra.js",
+        'import { who } from "./lib/name.js";\nexport const shout = () => who().toUpperCase();\n',
+      ),
+    mine,
+  );
+  write(
+    origin,
+    "app.js",
+    'import { whom } from "./lib/name.js";\nexport const greet = () => "hello " + whom();\n',
+  );
+  sh(origin, "git commit -qam 'greet whom'");
+  checkedAgent(
+    {
+      "a-standalone": `printf 'export const who = () => "world";\\nexport const whom = who;\\n' > lib/name.js`,
+    },
+    mine,
+  );
+  const failed = autofork(mine, "sync");
+  expect(failed.ok).toBe(true);
+  expect(failed.log).toContain(
+    "verify fails on upstream alone where the fork was too, so the patches are what make it pass",
+  );
+  expect(failed.log).toContain("healed a-standalone");
+  expect(file(home, "agent-runs.log")).toBe("a-standalone\n");
+  expect(file(home, "prompt-a-standalone.txt")).toContain(
+    'Patch "a-standalone" still applies cleanly, and it\'s applied here',
+  );
+  expect(file(mine, "lib/name.js")).toContain("export const whom = who;");
+  expect(file(mine, "extra.js")).toContain("who().toUpperCase()");
+
+  write(origin, "notes.txt", "uno\n");
+  sh(origin, "git commit -qam 'notes in spanish'");
+  checkedAgent(
+    {
+      "a-standalone": `grep -q '^<<<<<<< ours' notes.txt || exit 1; printf 'uno\\nstandalone\\n' > notes.txt`,
+    },
+    mine,
+  );
+  const drifted = autofork(mine, "sync");
+  expect(drifted.ok).toBe(true);
+  expect(drifted.log).toContain("healed a-standalone");
+  expect(file(home, "agent-runs.log")).toBe("a-standalone\n");
+  expect(file(mine, "notes.txt")).toBe("uno\nstandalone\n");
+  expect(file(mine, "lib/name.js")).toContain("export const whom = who;");
+});
+
+test("a fork without patches whose upstream never passes verify fails the sync instead of pushing", () => {
+  const origin = join(home, "unpatched");
+  const mine = join(home, "unpatched-fork");
+  mkdirSync(origin);
+  write(origin, "notes.txt", "one\n");
+  sh(origin, "git init -q && git add -A && git commit -qm init");
+  sh(home, `git clone -q ${origin} unpatched-fork`);
+  expect(autofork(mine, "init", origin, "--verify", "false").ok).toBe(true);
+  sh(mine, "git add -A && git commit -qm 'track upstream'");
+  write(origin, "notes.txt", "two\n");
+  sh(origin, "git commit -qam two");
+  const head = sh(mine, "git rev-parse HEAD");
+  const { ok, log } = autofork(mine, "sync");
+  expect(ok).toBe(false);
+  expect(log).toContain(
+    `verify fails on upstream ${sh(origin, "git rev-parse HEAD").slice(0, 12)} itself`,
+  );
   expect(sh(mine, "git rev-parse HEAD")).toBe(head);
 });
