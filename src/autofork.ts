@@ -355,7 +355,9 @@ function unfinished({ conflicted, rejected, missed }: Left, to: string, from?: s
 }
 
 function healPrompt(config: Fork, build: Build, id: string, broken: string) {
-  const before = config.patches.slice(0, config.patches.indexOf(id));
+  const index = config.patches.indexOf(id);
+  const before = config.patches.slice(0, index);
+  const after = config.patches.slice(index + 1).filter((later) => !build.upstreamHas.has(later));
   const fresh = isEmpty(patchFile(build.dir, id));
   const steps = [
     `Read ${DIR}/${id}/PATCH.md. It says what the patch does and why, and that's the contract.`,
@@ -365,7 +367,7 @@ function healPrompt(config: Fork, build: Build, id: string, broken: string) {
           `${DIR}/${id}/${id}.patch is how it was done before. Use it as a guide, not as text to force in.`,
         ]),
     "Build it on the current source, the smallest change that fully does what PATCH.md says. Build on what upstream has now: where upstream has its own version of what the patch touches, change that rather than bringing the old one back. Follow upstream's code and conventions, and leave everything else alone.",
-    `Run upstream's own checks for the code you touched${config.verify ? `, and \`${config.verify}\`, which the sync has to pass` : ""}.${config.setup ? ` Dependencies are installed: \`${config.setup}\` ran here, so run it again if you change them.` : ""} Fix what your change breaks. Patches after this one aren't applied yet.`,
+    `Run upstream's own checks for the code you touched${config.verify ? `, and \`${config.verify}\`, which the sync has to pass` : ""}.${config.setup ? ` Dependencies are installed: \`${config.setup}\` ran here, so run it again if you change them.` : ""} Fix what your change breaks.${after.length ? ` Patches after this one aren't applied yet: ${after.join(", ")}. Each goes on top of yours, so leave what its PATCH.md asks for to it.` : ""}`,
     ...(fresh
       ? [
           `Add a short paragraph to the end of ${DIR}/${id}/PATCH.md on why it's built the way it is, for whoever rebuilds it after upstream moves. Keep what's there as it is.`,
