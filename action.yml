@@ -6,17 +6,20 @@ branding:
   color: green
 inputs:
   token:
-    description: Token that pushes the signed sync commit
+    description: Token that pushes the signed sync commit and opens its issues
     default: ${{ github.token }}
   heal:
     description: Let the agent rebuild patches that no longer apply or fail verify. When false, they wait for a run that heals.
     default: "true"
+  workflow-token-url:
+    description: "Where to get a token that can push workflow files, so the sync's agent can bring upstream's changes into the workflows the fork keeps. autofork.com's app gives one. Needs `id-token: write`."
+    default: ""
   codex-auth-url:
     description: "Where to send Codex's sign-in after it refreshes, so the CODEX_AUTH secret stays current. Needs `id-token: write`."
     default: ""
 outputs:
   result:
-    description: synced, current, waiting, skipped, moved, or failed
+    description: synced, current, waiting (a patch needs a run that heals, or this month's limits are reached), skipped, moved, or failed
     value: ${{ steps.sync.outputs.result }}
   tag:
     description: The upstream release tag a sync moved to, when the fork follows releases
@@ -29,12 +32,19 @@ runs:
         path: ${{ runner.temp }}/autofork-failed
         key: autofork-failed-${{ github.run_id }}
         restore-keys: autofork-failed-
+    - uses: actions/cache/restore@v6
+      with:
+        path: ${{ runner.temp }}/autofork-ledger.json
+        key: autofork-ledger-${{ github.run_id }}-${{ github.run_attempt }}
+        restore-keys: autofork-ledger-
     - id: sync
       shell: bash
       env:
         GH_TOKEN: ${{ inputs.token }}
         HEAL: ${{ inputs.heal }}
         CODEX_AUTH_URL: ${{ inputs.codex-auth-url }}
+        WORKFLOW_TOKEN_URL: ${{ inputs.workflow-token-url }}
+        AUTOFORK_LEDGER: ${{ runner.temp }}/autofork-ledger.json
       run: '"$GITHUB_ACTION_PATH/action.sh"'
     - if: (failure() || cancelled()) && steps.sync.outputs.key != ''
       shell: bash
@@ -44,3 +54,14 @@ runs:
       with:
         path: ${{ runner.temp }}/autofork-failed
         key: autofork-failed-${{ steps.sync.outputs.key }}
+    - if: always() && steps.sync.outputs.ledger != ''
+      uses: actions/cache/save@v6
+      with:
+        path: ${{ runner.temp }}/autofork-ledger.json
+        key: autofork-ledger-${{ github.run_id }}-${{ github.run_attempt }}
+    - if: failure() || cancelled()
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.token }}
+        ERROR: ${{ steps.sync.outputs.error }}
+      run: '"$GITHUB_ACTION_PATH/action.sh" failed'

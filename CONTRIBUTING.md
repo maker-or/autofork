@@ -15,4 +15,4 @@ bun run check
 
 Every pull request is also reviewed by microscope: a maintainer runs `microscope review <number>` after it opens and after each push, and you fix or reply to what it finds. Merging needs its `microscope/correctness` status.
 
-Forks run the action at the `v1` tag, which we move up to `main` when a change should reach them.
+Forks run the action at the `v1` tag, which we move up to `main` when a change should reach them. Each time we move it, we publish that version to npm as `autofork`, which `npx autofork` runs.

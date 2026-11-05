@@ -16,23 +16,31 @@ A fork with an `.autofork/` folder is upstream plus patches. A workflow rebuilds
 ## Fork a repo
 
 ```sh
-npx github:AVGVSTVS96/autofork fork owner/repo --verify "<command that checks a build>"
+npx autofork fork owner/repo
 ```
 
-It follows upstream's releases, or its default branch if it has none. `--follow <branch>` picks a branch; `--follow 'v*-nightly.*'` picks a channel of releases by tag, and `init` lists the channels upstream publishes. It needs `gh` logged in. If `CLAUDE_CODE_OAUTH_TOKEN` is set, it also adds that secret; otherwise tell the user to run `claude setup-token` and `gh secret set CLAUDE_CODE_OAUTH_TOKEN`. In a fork that's already cloned, use `init owner/repo` instead.
+It follows upstream's releases, or its default branch if it has none. `--follow <branch>` picks a branch; `--follow 'v*-nightly.*'` picks a channel of releases by tag; stable is `releases`, the default. To see the channels upstream publishes, list its releases (`gh release list -R owner/repo --exclude-drafts -L 100`) and its tags (`git ls-remote --tags --refs --sort=-v:refname <url> | head -100`), since a channel can be published as tags alone. A channel's pattern keeps the part of the tag that names it and puts `*` for the numbers, like `v*-nightly.*`: `*` matches anything, so a pattern without that part also matches other channels, and a `follow` without `*` is read as a branch. It needs `gh` logged in. In a fork that's already cloned, use `npx autofork init owner/repo` instead, with upstream's name, and save the fork's own changes as patches before pushing.
 
-`verify` is the check a sync has to pass before it pushes, and the agent that rebuilds a patch runs it too. A patch that still applies but fails it is rebuilt like one that no longer applies. Take it from upstream's own CI: checks that cover the code the patches touch, pass on upstream as it is (or, when upstream can't build on its own, like a package split out of a monorepo, with the patch that makes it build), and give the same answer every run. Install dependencies with `--setup "<command>"`, so `verify` is just the check, and set up the tools both need in `.github/workflows/autofork.yml`, before the autofork step. A patch that breaks `setup` is rebuilt the same way. List the files `setup` writes, like lockfiles, with `--generated <file>,<file>`: they stay out of patches and are rebuilt once the patches are in. All three are kept in `.autofork/config.json`.
+If `CLAUDE_CODE_OAUTH_TOKEN` is set, `fork` also adds that secret. Otherwise give the user the sign-in steps it prints, for Claude or ChatGPT, then run `gh workflow run autofork.yml --repo <fork>`: the run `fork`'s push started fails without the secret, and this one builds the README line if `fork` wrote one.
+
+GitHub runs the workflow on the `cron` line in `.github/workflows/autofork.yml`, often hours late. `npx autofork link`, run in the clone once the config is pushed to the fork's default branch, has autofork.com start syncs within a minute of upstream changing. The user finishes it in a browser at `https://autofork.com/link/<owner>/<name>`, signing in with GitHub and adding autofork's app to the fork, and `link` waits up to 10 minutes for that, so give the user the link and run `link` in the background or again once they're done. Like `workflow-token-url`, the app lets code the sync runs push workflow files, so say so when offering it.
+
+`verify` is the check a sync has to pass before it pushes, and `setup` installs what it needs. Leave both out and the first agent run picks them from upstream's CI; until one runs, syncs push without a check. When the user names a check, give it with `--verify "<command>"` and its install with `--setup "<command>"`, since a fork with its own `verify` gets no picked `setup`. A check should pass on upstream as it is (or, when upstream can't build on its own, like a package split out of a monorepo, with the patch that makes it build) and give the same answer every run. Set up the tools both need in `.github/workflows/autofork.yml`, before the autofork step. List the files `setup` writes, like lockfiles, with `--generated <file>,<file>`: they stay out of patches and are rebuilt once the patches are in.
 
 ## Change a fork
 
+Start from a fork whose first sync has run: once it has the sign-in, wait for the autofork run you started to finish (`gh run list --repo <fork> -w autofork.yml -L 1`), then `git pull`.
+
 1. Make the change.
 2. Write `.autofork/<id>/PATCH.md`, the prose an agent rebuilds the change from after upstream rewrites that code: what the user wants and why, and why it's built the way it is where upstream does it differently. Write it from what the user asked for; a commit message or diff only says how.
-3. Run `npx github:AVGVSTVS96/autofork save <id>`.
+3. Run `npx autofork save <id>`.
 4. Commit everything and push.
 
-Every source change must belong to a patch: once upstream moves, a sync refuses to rebuild while the fork has changes no patch holds, and `autofork status` lists them. To change an existing patch, edit the code, update its `PATCH.md` if the intent changed, and `save` the same id. When a change reaches code `verify` doesn't check, widen `verify` in `.autofork/config.json`.
+Every source change must belong to a patch: once upstream moves, a sync refuses to rebuild while the fork has changes no patch holds, and `npx autofork status` lists them. To change an existing patch, edit the code, update its `PATCH.md` if the intent changed, and `save` the same id. `save` puts every change no patch holds yet into `<id>`, so save each change before starting the next. To drop a patch, delete its folder and undo its change in the same commit. When a change reaches code `verify` doesn't check, widen `verify` in `.autofork/config.json`.
 
 A patch can also be just a `PATCH.md`. Push it and the next sync has an agent build it.
+
+A sync that fails opens an `autofork sync failed` issue saying why, with a link to the run. Fix what it names, push, and start a sync with `gh workflow run autofork.yml --repo <fork>`.
 
 Patches go on in the alphabetical order of their ids, each on top of the ones before it. Give a patch the others need, like one that makes the project build on its own, an id that sorts first, like `0-standalone`.
 
@@ -42,7 +50,11 @@ If `.autofork/<id>/UPSTREAM.md` exists, upstream shipped its own version of that
 
 ## When upstream changes a workflow
 
-A sync never changes `.github/`: it's the fork's own, and a workflow's GitHub token can't push workflow files. When upstream changes a workflow the fork keeps a copy of, the sync says so in its commit message, `upstream changed <file> in <from>..<to>`, and opens an issue. Bring over what the fork needs from upstream's change, keeping what the fork's copy does differently, or delete copies the fork doesn't run. Then close the issue.
+`.github/workflows/` is the fork's own, and the rest of `.github/` syncs like code, so a fork's own changes there, like a composite action its release workflow uses, are saved as a patch. When upstream changes a workflow the fork keeps a copy of, the sync's agent brings over what the fork's copy needs. Pushing that takes a token that can push workflow files, which a workflow's own GitHub token can't: forks made on autofork.com get one from autofork's GitHub app. For another fork, install the app (https://github.com/apps/autofork-app), then give the autofork step `workflow-token-url: https://autofork.com/api/github/token` and the workflow `id-token: write`. Code the sync runs can reach that token too, so ask the user before turning it on. Without one, the sync opens an issue. Bring over what the fork needs from upstream's change, keeping what the fork's copy does differently, or delete copies the fork doesn't run. Then close the issue.
+
+## Spend limits
+
+Every agent run counts against `limits` in `.autofork/config.json`: by default 10 rebuilds a month (UTC), $200 a month and $20 a rebuild, at API prices (on a Claude or ChatGPT plan, what the run would cost on the API, not a bill). With no room the sync ends `waiting`, and one line in the run's log says what's left and when it runs. To let a waiting sync run now, raise each key the line names, by as much as the user agrees to, and push.
 
 ## Apps that update themselves
 

@@ -8,7 +8,7 @@ List every place the app or its build reads releases from upstream's repo: the u
 
 ## 2. Follow the channel the user installs
 
-Set `follow` to the channel the user runs. `init` lists the channels upstream publishes; pick one by its tag pattern, like `"v*-nightly.*"`, or `"releases"` for stable. The fork releases each build under the same tag as the upstream release it's built on, so the updater compares versions the way it does upstream.
+Set `follow` to the channel the user runs. `gh release list -R owner/repo --exclude-drafts -L 100` shows the channels upstream publishes; pick one by its tag pattern, like `"v*-nightly.*"`, or `"releases"` for stable. The fork releases each build under the same tag as the upstream release it's built on, so the updater compares versions the way it does upstream.
 
 ## 3. Point the updater at the fork
 
@@ -16,14 +16,14 @@ Make one patch, a `release-feed` patch, that swaps upstream's repo for the fork'
 
 ## 4. Add a release workflow
 
-Start from upstream's release workflow, and save it under the same name in `.github/workflows/`. A sync never changes it, and when upstream changes its own, the sync opens an issue so the fork can bring the change over.
+Start from upstream's release workflow, and save it under the same name in `.github/workflows/`. It's the fork's own: when upstream changes its copy, the sync's agent brings the change over, or opens an issue when it can't get a token that can push workflow files (see "When upstream changes a workflow" in SKILL.md).
 
 - Trigger it only on `workflow_dispatch`, with a `tag` input, which `autofork.yml` fills in. Upstream's tag triggers never fire in the fork.
 - Build the commit the dispatch ran on, the fork's branch. Never check out upstream's tag, which has none of the patches.
 - Give the build the version from the tag explicitly. The fork's commit carries no tag, so tools that read the version from git get it wrong.
 - Keep the builds and the update files. Drop package registry publishing, deploys, announcements and anything else that needs upstream's secrets.
-- Publish the GitHub Release yourself, under the tag and at the built commit, with upstream's prerelease and latest flags for that tag. Never publish a draft. Updaters skip drafts.
-- Open an issue when a run fails, or comment on the one already open. GitHub tells only whoever started a run that it failed, and `autofork.yml`'s dispatch is started by GitHub's bot.
+- Publish the GitHub Release yourself, under the tag and at the built commit, replacing one already there, with upstream's prerelease and latest flags for that tag. Never publish a draft. Updaters skip drafts.
+- Open an issue when a run doesn't publish, failed or cancelled, or comment on the one already open. GitHub tells only whoever started a run that it failed, and `autofork.yml`'s dispatch is started by GitHub's bot.
 - Run on GitHub's standard hosted runners, which cost nothing on a public fork. A private fork pays for every minute, and macOS minutes cost the most.
 
 Then start it from `autofork.yml`. A push made with `GITHUB_TOKEN` starts no workflows, but a dispatch does. Give the autofork step `id: autofork`, add `actions: write` to the workflow's `permissions`, and add this step after it, with the release workflow's file name:
@@ -46,7 +46,7 @@ An updater installs a build only if it passes the updater's checks, and upstream
 
 ## 6. Check the real release
 
-Download the fork's release, not a local build, and check:
+After that, each sync to a new upstream release starts the release workflow. For the first release, once the patches are pushed and the fork's latest autofork run says it's up to date with upstream at a commit, start it by hand with the upstream release tag at that commit: `gh workflow run <release workflow> --repo <fork> -f tag=<tag>`. Download that release, not a local build, and check:
 
 - The version is the upstream tag.
 - The feed file inside the app names the fork and the channel.
@@ -64,4 +64,4 @@ Keep the bundle id and app id, so the app finds its existing data. Download with
 
 From then on, each upstream release in the channel reaches the install through its own updater.
 
-A change to a patch alone rebuilds the release under the same tag. Installs already on that version pick the change up with the next upstream release.
+A change to a patch reaches installs with the next upstream release. A sync that has an agent build a patch on the same upstream release republishes that tag's release, which installs already on that version don't pick up.
